@@ -6,6 +6,7 @@ from ols import config
 config.ols_config.authentication_config.module = "k8s"
 
 from ols.app.endpoints import (  # noqa:E402
+    a2a,
     authorized,
     conversations,
     feedback,
@@ -38,7 +39,8 @@ def test_include_routers():
     include_routers(app)
 
     # are all routers added?
-    assert len(app.routers) == 10
+    assert len(app.routers) == 11
+    assert a2a.router in app.routers
     assert authorized.router in app.routers
     assert conversations.router in app.routers
     assert feedback.router in app.routers

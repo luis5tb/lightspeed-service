@@ -153,6 +153,21 @@ dependencies = [
     "opentelemetry-sdk>=1.20.0",  # For audit tracing
     "opentelemetry-exporter-otlp-proto-grpc>=1.20.0",  # For OTLP span export
     "torch>=2.11.0",
+    # For the A2A endpoint's Keycloak token validation/exchange (ols/app/endpoints/a2a_auth.py).
+    # Already present transitively (pinned at pyjwt==2.14.0 in requirements.txt); declared
+    # directly here since a2a_auth.py imports it explicitly.
+    "PyJWT[crypto]>=2.10.0,<3.0.0",
+    # For this pod's own SPIFFE JWT-SVID fetch during A2A token exchange. Same pin used by
+    # agents/rca_agent and agents/acme_agent elsewhere in this pattern repository.
+    "spiffe==0.3.1",
+    # The real A2A server framework (ols/app/endpoints/a2a.py), replacing a
+    # hand-rolled JSON-RPC dispatcher. Pinned to exactly the version
+    # agents/acme_agent's own a2a-sdk client resolves to
+    # (agents/acme_agent/requirements.txt: a2a-sdk==1.1.5), for wire-format
+    # parity with the one real client this endpoint serves. [http-server]
+    # provides the Starlette route builders (create_jsonrpc_routes,
+    # create_agent_card_routes); [fastapi] provides add_a2a_routes_to_fastapi.
+    "a2a-sdk[http-server,fastapi]==1.1.5",
 ]
 requires-python = ">=3.12,<3.13"
 readme = "README.md"

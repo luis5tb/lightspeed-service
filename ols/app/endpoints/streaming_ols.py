@@ -8,7 +8,7 @@ import json
 import logging
 import time
 from contextlib import ExitStack, nullcontext
-from typing import Any, AsyncGenerator, Generator, Optional, Union
+from typing import Any, AsyncGenerator, Awaitable, Callable, Generator, Optional, Union
 
 from fastapi import APIRouter, Depends, status
 from fastapi.responses import StreamingResponse
@@ -394,6 +394,8 @@ async def response_processing_wrapper(  # noqa: C901  # pylint: disable=R0912,R0
     timestamps: dict[str, float],
     skip_user_id_check: bool,
     audit_ctx: Optional[AuditContext] = None,
+    chunk_handler: Optional[Callable[[StreamedChunk], Awaitable[bool]]] = None,
+    error_handler: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> AsyncGenerator[str, None]:
     """Process the response from the generator and handle metadata and errors.
 
@@ -408,6 +410,9 @@ async def response_processing_wrapper(  # noqa: C901  # pylint: disable=R0912,R0
         timestamps: Dictionary tracking timestamps for various stages.
         skip_user_id_check: Skip user_id usid check.
         audit_ctx: Audit context for structured event logging.
+        chunk_handler: Optional callback for each generated chunk. Return
+            ``False`` to stop processing without storing a partial response.
+        error_handler: Optional callback for a sanitized, user-facing error.
 
     Yields:
         str: The response items or error messages.
@@ -444,6 +449,10 @@ async def response_processing_wrapper(  # noqa: C901  # pylint: disable=R0912,R0
                     msg = f"Expecting StreamedChunk, but got {type(item)}: {item}"
                     logger.error(msg)
                     raise ValueError(msg)
+                if chunk_handler is not None and not await chunk_handler(item):
+                    if audit_ctx:
+                        audit_ctx.logger.request_failed(error="response_processing_stopped")
+                    return
                 match item.type:
                     case StreamChunkType.TOOL_CALL:
                         tool_calls.append(item.data)
@@ -539,14 +548,20 @@ async def response_processing_wrapper(  # noqa: C901  # pylint: disable=R0912,R0
         except PromptTooLongError as summarizer_error:
             if audit_ctx:
                 audit_ctx.logger.request_failed(error="prompt_too_long")
-            yield prompt_too_long_error(summarizer_error, media_type)
+            error_message = prompt_too_long_error(summarizer_error, media_type)
+            if error_handler:
+                await error_handler(error_message)
+            yield error_message
             return
         except Exception as summarizer_error:
             if audit_ctx:
                 audit_ctx.logger.request_failed(
                     error=type(summarizer_error).__name__,
                 )
-            yield generic_llm_error(summarizer_error, media_type)
+            error_message = generic_llm_error(summarizer_error, media_type)
+            if error_handler:
+                await error_handler(error_message)
+            yield error_message
             return
 
         timestamps["generate response"] = time.time()
@@ -617,6 +632,8 @@ async def response_processing_wrapper(  # noqa: C901  # pylint: disable=R0912,R0
                 finalization_error,
             )
             msg = "An internal error occurred after the response was generated."
+            if error_handler:
+                await error_handler(msg)
             if media_type == MEDIA_TYPE_TEXT:
                 yield msg
             else:
@@ -624,4 +641,9 @@ async def response_processing_wrapper(  # noqa: C901  # pylint: disable=R0912,R0
                     {"event": "error", "data": {"response": msg, "cause": ""}}
                 )
     finally:
-        exit_stack.close()
+        try:
+            await generator.aclose()
+        except Exception:  # Cleanup must not mask the request outcome.
+            logger.exception("Failed to close response generator")
+        finally:
+            exit_stack.close()
