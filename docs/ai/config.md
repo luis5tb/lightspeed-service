@@ -105,6 +105,13 @@ Config classes have two validation phases:
 
 If you add a new config class that needs file existence checks or cross-section validation, add a `validate_yaml()` method and call it from the appropriate parent config's `validate_yaml()`.
 
+### Optional A2A server (`a2a`)
+
+Top-level `a2a.enabled` (default `false`) gates mounting of the Agent2Agent
+surface. Keycloak/SPIFFE settings remain environment variables
+(`A2A_KEYCLOAK_ISSUER_URL`, `A2A_CLUSTER_ID`, `A2A_RPC_URL`, …). `A2A_ENABLED`
+overrides the YAML flag when set. See `.ai/spec/what/a2a.md`.
+
 ### Optional Solr hybrid RAG (`ols_config.solr_hybrid`)
 
 Omit the key to leave Solr hybrid RAG off (no client, no tool). When present, values map to `SolrHybridSettings` and the feature is active. `solr_http_base` must be a valid `http` or `https` URL with a host (checked in `validate_yaml()`).

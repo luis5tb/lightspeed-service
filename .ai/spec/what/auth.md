@@ -2,9 +2,11 @@
 
 Control which users can access the OpenShift LightSpeed service and what they are permitted to do, integrating with Kubernetes RBAC in production and providing bypass modes for development.
 
+The A2A protocol surface (when enabled) uses a separate Keycloak JWKS + SPIFFE/RFC 8693 trust model and does not use these modules. See `what/a2a.md`.
+
 ## Behavioral Rules
 
-1. The system must support exactly three authentication modules: `k8s`, `noop`, and `noop-with-token`.
+1. The system must support exactly three authentication modules for the REST API: `k8s`, `noop`, and `noop-with-token`.
 2. The authentication module must be selected once at startup from configuration and must not change for the lifetime of the process.
 3. If no authentication module is specified in configuration, the system must default to `k8s`.
 4. If an unsupported module value is specified, the system must reject the configuration at startup.

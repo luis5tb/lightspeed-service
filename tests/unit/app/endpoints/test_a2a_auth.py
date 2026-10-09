@@ -89,7 +89,7 @@ def make_settings(**overrides: Any) -> a2a_auth.A2ASettings:
         spiffe_endpoint_socket="",
         spiffe_timeout_seconds=5.0,
         cluster_id=CLUSTER_ID,
-        rpc_url="https://praxis.example.com/",
+        rpc_url="https://praxis.example.com/a2a",
         agent_name="openshift-lightspeed",
         agent_description="test",
         keycloak_timeout_seconds=5.0,
@@ -527,3 +527,33 @@ class TestTlsVerify:
         assert verify is fake_ctx
         # Must not be the bare path string (that would replace system trust).
         assert not isinstance(verify, str)
+
+
+class TestDiscoveryCache:
+    @pytest.mark.asyncio
+    async def test_discovery_document_is_ttl_cached(self, jwk):
+        settings = make_settings(jwks_cache_seconds=300)
+        cache = a2a_auth._JWKSCache(settings)
+        calls = {"n": 0}
+
+        def responder(url: str, data: Optional[dict] = None) -> _FakeResponse:
+            calls["n"] += 1
+            if url.endswith("/.well-known/openid-configuration"):
+                return _FakeResponse(
+                    {
+                        "issuer": ISSUER,
+                        "jwks_uri": f"{ISSUER}/protocol/openid-connect/certs",
+                        "token_endpoint": f"{ISSUER}/protocol/openid-connect/token",
+                    }
+                )
+            raise AssertionError(url)
+
+        client = _FakeAsyncClient(responder)
+        first = await cache.discovery(client)
+        second = await cache.discovery(client)
+        assert first is second
+        assert calls["n"] == 1
+
+        cache._discovery_expiry = 0.0
+        await cache.discovery(client)
+        assert calls["n"] == 2

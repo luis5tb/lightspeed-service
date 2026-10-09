@@ -83,6 +83,11 @@ class AppConfig:
         return {server.name: server for server in self.config.mcp_servers.servers}
 
     @property
+    def a2a(self) -> config_model.A2AConfig:
+        """Return the A2A server configuration."""
+        return self.config.a2a
+
+    @property
     def dev_config(self) -> config_model.DevConfig:
         """Return the dev configuration."""
         return self.config.dev_config

@@ -49,7 +49,7 @@ The configuration system loads, validates, and manages the single YAML file that
 
 ### Top-Level Sections
 
-The YAML file has four top-level sections:
+The YAML file has five top-level sections:
 
 | Section | Required | Purpose | Detail Spec |
 |---------|----------|---------|-------------|
@@ -57,6 +57,7 @@ The YAML file has four top-level sections:
 | `ols_config` | Yes | All service behavior configuration | (fields enumerated below) |
 | `mcp_servers` | No | MCP server definitions | see what/tools.md |
 | `dev_config` | No | Developer-mode flags | (fields enumerated below) |
+| `a2a` | No | A2A server enablement (`enabled`, default false); Keycloak/SPIFFE settings remain env-based | see what/a2a.md |
 
 ### `ols_config` Fields
 

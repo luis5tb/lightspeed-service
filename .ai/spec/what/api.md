@@ -1,6 +1,6 @@
-# REST API
+# External API
 
-The REST API is the only external interface to the OpenShift LightSpeed service. Every capability -- queries, conversations, feedback, tools, health checks, and metrics -- is exposed through HTTP endpoints defined here.
+The versioned REST API under `/v1` is the primary external interface to the OpenShift LightSpeed service for queries, conversations, feedback, tools, health checks, and metrics. When A2A is enabled, OLS also exposes an Agent2Agent protocol surface (`GET /.well-known/agent-card.json` and `POST /a2a`); see `what/a2a.md`.
 
 ## Behavioral Rules
 

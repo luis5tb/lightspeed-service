@@ -1480,6 +1480,18 @@ class DevConfig(BaseModel):
     uvicorn_port_number: Optional[int] = None
 
 
+class A2AConfig(BaseModel):
+    """A2A (Agent2Agent) server surface configuration.
+
+    When disabled (the default), OLS does not mount the A2A agent card or
+    JSON-RPC routes. ACME deployments enable this section (or set the
+    ``A2A_ENABLED`` environment variable) and supply Keycloak/SPIFFE settings
+    via environment variables consumed by ``ols.app.endpoints.a2a_auth``.
+    """
+
+    enabled: bool = False
+
+
 class Config(BaseModel):
     """Global service configuration."""
 
@@ -1487,6 +1499,7 @@ class Config(BaseModel):
     ols_config: OLSConfig = OLSConfig()
     dev_config: DevConfig = DevConfig()
     mcp_servers: MCPServers = MCPServers()
+    a2a: A2AConfig = A2AConfig()
 
     def __init__(
         self,
@@ -1517,6 +1530,7 @@ class Config(BaseModel):
 
         # initialize MCP servers
         self.mcp_servers = MCPServers(servers=data.get("mcp_servers", []))
+        self.a2a = A2AConfig(**(data.get("a2a") or {}))
 
         # Validate MCP servers now that auth config is available
         self._validate_mcp_servers()

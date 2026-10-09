@@ -15,6 +15,7 @@ These specs define the requirements, behaviors, and architecture for the OLS lig
 |------|-------------|
 | [system-overview.md](what/system-overview.md) | Core capabilities, user personas, deployment models, system boundaries |
 | [api.md](what/api.md) | REST API contracts: all 16 endpoints, request/response shapes, streaming events, middleware |
+| [a2a.md](what/a2a.md) | A2A server surface: enablement, Keycloak/SPIFFE auth, query-mode extension, context continuity |
 | [query-processing.md](what/query-processing.md) | 8-stage pipeline from user query to LLM response: redaction, RAG, history, skills, tools, storage |
 | [agent-modes.md](what/agent-modes.md) | ASK vs TROUBLESHOOTING: iteration limits, system prompts, behavioral differences |
 | [conversation-history.md](what/conversation-history.md) | Storage backends, CRUD operations, compression, user isolation, concurrency |

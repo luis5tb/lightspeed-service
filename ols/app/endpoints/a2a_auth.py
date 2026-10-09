@@ -276,18 +276,25 @@ def audit_record(
 
 
 class _JWKSCache:
-    """Caches Keycloak OIDC discovery and JWKS documents."""
+    """Caches Keycloak OIDC discovery and JWKS documents with matching TTLs."""
 
     def __init__(self, settings: A2ASettings) -> None:
         self._settings = settings
         self._discovery: Optional[dict[str, Any]] = None
+        self._discovery_expiry = 0.0
         self._jwks: Optional[dict[str, Any]] = None
         self._jwks_expiry = 0.0
         self._lock = threading.Lock()
 
-    async def discovery(self, client: httpx.AsyncClient) -> dict[str, Any]:
+    async def discovery(
+        self, client: httpx.AsyncClient, force_refresh: bool = False
+    ) -> dict[str, Any]:
         """Return (and cache) the OIDC discovery document."""
-        if self._discovery is not None:
+        if (
+            self._discovery is not None
+            and not force_refresh
+            and time.monotonic() < self._discovery_expiry
+        ):
             return self._discovery
         url = f"{self._settings.keycloak_issuer_url}/.well-known/openid-configuration"
         try:
@@ -302,7 +309,9 @@ class _JWKSCache:
             raise A2AAuthenticationError("Keycloak issuer does not match configuration")
         if not discovery.get("jwks_uri"):
             raise A2AAuthenticationError("Keycloak discovery does not contain jwks_uri")
-        self._discovery = discovery
+        with self._lock:
+            self._discovery = discovery
+            self._discovery_expiry = time.monotonic() + self._settings.jwks_cache_seconds
         return discovery
 
     async def jwks(self, client: httpx.AsyncClient, force_refresh: bool = False) -> dict[str, Any]:
@@ -313,7 +322,7 @@ class _JWKSCache:
             and time.monotonic() < self._jwks_expiry
         ):
             return self._jwks
-        discovery = await self.discovery(client)
+        discovery = await self.discovery(client, force_refresh=force_refresh)
         try:
             response = await client.get(discovery["jwks_uri"])
             response.raise_for_status()
@@ -571,8 +580,3 @@ def get_authenticator() -> A2AAuthenticator:
             if _authenticator is None:
                 _authenticator = A2AAuthenticator(A2ASettings.from_env())
     return _authenticator
-
-
-async def authenticate_request(request: Request) -> CallerIdentity:
-    """FastAPI dependency: validate the inbound A2A caller and cluster header."""
-    return await get_authenticator().authenticate_caller(request)

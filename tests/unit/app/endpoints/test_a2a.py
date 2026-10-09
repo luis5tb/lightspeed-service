@@ -111,6 +111,7 @@ def client(monkeypatch, jwk):
     monkeypatch.setattr(
         a2a_auth.SpiffeWorkloadIdentity, "fetch", AsyncMock(return_value="jwt-svid-value")
     )
+    a2a_executor.clear_context_conversations()
 
     app = FastAPI()
     a2a.register_routes(app)
@@ -187,16 +188,26 @@ class TestAgentCard:
         response = client.get("/.well-known/agent-card.json")
         assert response.status_code == 200
         card = response.json()
-        assert card["supportedInterfaces"][0]["url"] == "https://praxis.example.com/"
+        assert card["supportedInterfaces"][0]["url"] == "https://praxis.example.com/a2a"
         assert card["supportedInterfaces"][0]["protocolBinding"] == "JSONRPC"
         assert card["capabilities"]["streaming"] is True
         assert {skill["id"] for skill in card["skills"]} == {"ask", "troubleshooting"}
+        extensions = card["capabilities"]["extensions"]
+        assert len(extensions) == 1
+        ext = extensions[0]
+        assert ext["uri"] == a2a_executor.QUERY_MODE_EXTENSION_URI
+        # protobuf JSON omits default false bools
+        assert ext.get("required", False) is False
+        assert ext["params"]["modes"] == ["ask", "troubleshooting"]
+        assert ext["params"]["defaultMode"] == "ask"
+        assert ext["params"]["metadataKey"] == "ols_mode"
+        assert "single-replica" in card["description"]
 
 
 class TestAuthenticationEnforcement:
     def test_missing_token_is_rejected(self, client):
         response = client.post(
-            "/",
+            "/a2a",
             json=send_message_body(),
             headers={a2a_auth.CLUSTER_HEADER_NAME: CLUSTER_ID, "A2A-Version": PROTOCOL_VERSION_1_0},
         )
@@ -204,7 +215,7 @@ class TestAuthenticationEnforcement:
 
     def test_invalid_token_is_rejected(self, client):
         response = client.post(
-            "/",
+            "/a2a",
             json=send_message_body(),
             headers=auth_headers("not-a-valid-jwt"),
         )
@@ -213,24 +224,24 @@ class TestAuthenticationEnforcement:
     def test_missing_cluster_header_is_rejected(self, rsa_keypair, client):
         token = make_token(rsa_keypair)
         response = client.post(
-            "/", json=send_message_body(), headers=auth_headers(token, cluster=None)
+            "/a2a", json=send_message_body(), headers=auth_headers(token, cluster=None)
         )
         assert response.status_code == 403
 
     def test_unknown_cluster_header_is_rejected(self, rsa_keypair, client):
         token = make_token(rsa_keypair)
         response = client.post(
-            "/", json=send_message_body(), headers=auth_headers(token, cluster="some-other-cluster")
+            "/a2a", json=send_message_body(), headers=auth_headers(token, cluster="some-other-cluster")
         )
         assert response.status_code == 403
 
     def test_wrong_azp_is_rejected(self, rsa_keypair, client):
         token = make_token(rsa_keypair, azp="some-untrusted-client")
-        response = client.post("/", json=send_message_body(), headers=auth_headers(token))
+        response = client.post("/a2a", json=send_message_body(), headers=auth_headers(token))
         assert response.status_code == 401
 
     def test_agent_card_is_not_gated_by_auth(self, client):
-        # Only "/" (POST) is gated; the discovery document is not.
+        # Only "/a2a" (POST) is gated; the discovery document is not.
         response = client.get("/.well-known/agent-card.json")
         assert response.status_code == 200
 
@@ -246,7 +257,7 @@ class TestSendMessage:
         token_a = make_token(rsa_keypair)
         body = send_message_body()
         body["params"]["message"]["contextId"] = "external-context-id"
-        response = client.post("/", json=body, headers=auth_headers(token_a))
+        response = client.post("/a2a", json=body, headers=auth_headers(token_a))
 
         assert response.status_code == 200
         body = response.json()
@@ -262,7 +273,7 @@ class TestSendMessage:
         # user_token) must see the *exchanged* token, never Token A.
         assert captured["user_token"] == "exchanged-token-b"
         assert captured["user_token"] != token_a
-        assert captured["mode"] == QueryMode.TROUBLESHOOTING
+        assert captured["mode"] == QueryMode.ASK
         assert captured["conversation_id"] != "external-context-id"
         uuid.UUID(captured["conversation_id"])
         assert captured["audit_ctx"] is not None
@@ -270,16 +281,59 @@ class TestSendMessage:
         # metadata is consumed only for the OLS mode selector.
         assert captured["client_headers"] is None
 
-    def test_ask_mode_is_selectable_in_message_metadata(self, rsa_keypair, client, monkeypatch):
+    def test_default_mode_is_ask(self, rsa_keypair, client, monkeypatch):
         captured = _stub_generate_response(monkeypatch, "general answer")
         token_a = make_token(rsa_keypair)
-        body = send_message_body()
-        body["params"]["message"]["metadata"] = {"ols_mode": "ask"}
 
-        response = client.post("/", json=body, headers=auth_headers(token_a))
+        response = client.post("/a2a", json=send_message_body(), headers=auth_headers(token_a))
 
         assert response.status_code == 200
         assert captured["mode"] == QueryMode.ASK
+
+    def test_troubleshooting_mode_is_selectable_in_message_metadata(
+        self, rsa_keypair, client, monkeypatch
+    ):
+        captured = _stub_generate_response(monkeypatch, "diagnostic answer")
+        token_a = make_token(rsa_keypair)
+        body = send_message_body()
+        body["params"]["message"]["metadata"] = {"ols_mode": "troubleshooting"}
+
+        response = client.post("/a2a", json=body, headers=auth_headers(token_a))
+
+        assert response.status_code == 200
+        assert captured["mode"] == QueryMode.TROUBLESHOOTING
+
+    def test_context_id_reuses_ols_conversation(self, rsa_keypair, client, monkeypatch):
+        a2a_executor.clear_context_conversations()
+        captured = _stub_generate_response(monkeypatch, "turn one", "turn two")
+        token_a = make_token(rsa_keypair)
+        body = send_message_body()
+        body["params"]["message"]["contextId"] = "shared-a2a-context"
+
+        first = client.post("/a2a", json=body, headers=auth_headers(token_a))
+        first_conversation = captured["conversation_id"]
+        assert first.status_code == 200
+        uuid.UUID(first_conversation)
+
+        body["id"] = "req-2"
+        body["params"]["message"]["messageId"] = "msg-2"
+        second = client.post("/a2a", json=body, headers=auth_headers(token_a))
+        assert second.status_code == 200
+        assert captured["conversation_id"] == first_conversation
+
+    def test_context_id_isolated_per_caller(self, rsa_keypair, client, monkeypatch):
+        a2a_executor.clear_context_conversations()
+        captured = _stub_generate_response(monkeypatch, "answer")
+        caller_one = make_token(rsa_keypair, sub="spiffe://trust-domain/ns/acme/sa/caller-one")
+        caller_two = make_token(rsa_keypair, sub="spiffe://trust-domain/ns/acme/sa/caller-two")
+        body = send_message_body()
+        body["params"]["message"]["contextId"] = "shared-looking-context"
+
+        client.post("/a2a", json=body, headers=auth_headers(caller_one))
+        conversation_one = captured["conversation_id"]
+        client.post("/a2a", json=body, headers=auth_headers(caller_two))
+        conversation_two = captured["conversation_id"]
+        assert conversation_one != conversation_two
 
     def test_unknown_mode_fails_before_query_or_token_exchange(
         self, rsa_keypair, client, monkeypatch
@@ -295,7 +349,7 @@ class TestSendMessage:
         body = send_message_body()
         body["params"]["message"]["metadata"] = {"ols_mode": "unsupported"}
 
-        response = client.post("/", json=body, headers=auth_headers(token_a))
+        response = client.post("/a2a", json=body, headers=auth_headers(token_a))
 
         assert response.status_code == 200
         task = response.json()["result"]["task"]
@@ -329,7 +383,7 @@ class TestSendMessage:
         monkeypatch.setattr(streaming_ols, "consume_tokens", lambda *args: consumed.append(args))
         token_a = make_token(rsa_keypair)
 
-        response = client.post("/", json=send_message_body(), headers=auth_headers(token_a))
+        response = client.post("/a2a", json=send_message_body(), headers=auth_headers(token_a))
 
         assert response.status_code == 200
         assert response.json()["result"]["task"]["status"]["state"] == "TASK_STATE_COMPLETED"
@@ -346,7 +400,7 @@ class TestSendMessage:
         )
         token_a = make_token(rsa_keypair)
         body = send_message_body(text="")
-        response = client.post("/", json=body, headers=auth_headers(token_a))
+        response = client.post("/a2a", json=body, headers=auth_headers(token_a))
 
         assert response.status_code == 200
         task = response.json()["result"]["task"]
@@ -363,7 +417,7 @@ class TestSendMessage:
         body = send_message_body()
         body["params"]["message"]["parts"] = [{"raw": "aGk="}]
 
-        response = client.post("/", json=body, headers=auth_headers(token_a))
+        response = client.post("/a2a", json=body, headers=auth_headers(token_a))
 
         assert response.status_code == 200
         task = response.json()["result"]["task"]
@@ -397,7 +451,7 @@ class TestSendMessage:
         )
         token_a = make_token(rsa_keypair)
 
-        response = client.post("/", json=send_message_body(), headers=auth_headers(token_a))
+        response = client.post("/a2a", json=send_message_body(), headers=auth_headers(token_a))
 
         assert response.status_code == 200
         task = response.json()["result"]["task"]
@@ -407,11 +461,11 @@ class TestSendMessage:
     def test_get_task_returns_previously_completed_task(self, rsa_keypair, client, monkeypatch):
         _stub_generate_response(monkeypatch, "answer")
         token_a = make_token(rsa_keypair)
-        send_response = client.post("/", json=send_message_body(), headers=auth_headers(token_a))
+        send_response = client.post("/a2a", json=send_message_body(), headers=auth_headers(token_a))
         task_id = send_response.json()["result"]["task"]["id"]
 
         get_response = client.post(
-            "/",
+            "/a2a",
             json={"jsonrpc": "2.0", "id": "req-2", "method": "GetTask", "params": {"id": task_id}},
             headers=auth_headers(token_a),
         )
@@ -424,7 +478,7 @@ class TestSendMessage:
     def test_get_task_unknown_id_returns_task_not_found_error(self, rsa_keypair, client):
         token_a = make_token(rsa_keypair)
         response = client.post(
-            "/",
+            "/a2a",
             json={"jsonrpc": "2.0", "id": "req-3", "method": "GetTask", "params": {"id": "does-not-exist"}},
             headers=auth_headers(token_a),
         )
@@ -439,7 +493,7 @@ class TestSendMessage:
         monkeypatch.setattr(a2a_executor, "generate_response", failing_generate_response)
         token_a = make_token(rsa_keypair)
 
-        response = client.post("/", json=send_message_body(), headers=auth_headers(token_a))
+        response = client.post("/a2a", json=send_message_body(), headers=auth_headers(token_a))
 
         assert response.status_code == 200  # JSON-RPC: transport succeeds, task fails
         task = response.json()["result"]["task"]
@@ -453,7 +507,7 @@ class TestStreaming:
         token_a = make_token(rsa_keypair)
         body = send_message_body(method="SendStreamingMessage")
 
-        with client.stream("POST", "/", json=body, headers=auth_headers(token_a)) as response:
+        with client.stream("POST", "/a2a", json=body, headers=auth_headers(token_a)) as response:
             assert response.status_code == 200
             events = [json.loads(line[len("data: "):]) for line in response.iter_lines() if line]
 
@@ -491,7 +545,7 @@ class TestMcpHeaderOverrideHasNoEffect:
         headers = auth_headers(token_a)
         headers["MCP-Headers"] = json.dumps({"github-mcp": {"Authorization": "Bearer stolen"}})
 
-        response = client.post("/", json=send_message_body(), headers=headers)
+        response = client.post("/a2a", json=send_message_body(), headers=headers)
 
         assert response.status_code == 200
         assert response.json()["result"]["task"]["status"]["state"] == "TASK_STATE_COMPLETED"
@@ -505,7 +559,7 @@ class TestMcpHeaderOverrideHasNoEffect:
             "mcpHeaders": {"github-mcp": {"Authorization": "Bearer stolen"}}
         }
 
-        response = client.post("/", json=body, headers=auth_headers(token_a))
+        response = client.post("/a2a", json=body, headers=auth_headers(token_a))
 
         assert response.status_code == 200
         assert response.json()["result"]["task"]["status"]["state"] == "TASK_STATE_COMPLETED"
@@ -518,11 +572,11 @@ class TestTaskIsolation:
         caller_one = make_token(rsa_keypair, sub="spiffe://trust-domain/ns/acme/sa/caller-one")
         caller_two = make_token(rsa_keypair, sub="spiffe://trust-domain/ns/acme/sa/caller-two")
 
-        send_response = client.post("/", json=send_message_body(), headers=auth_headers(caller_one))
+        send_response = client.post("/a2a", json=send_message_body(), headers=auth_headers(caller_one))
         task_id = send_response.json()["result"]["task"]["id"]
 
         get_response = client.post(
-            "/",
+            "/a2a",
             json={"jsonrpc": "2.0", "id": "req-x", "method": "GetTask", "params": {"id": task_id}},
             headers=auth_headers(caller_two),
         )
@@ -530,8 +584,152 @@ class TestTaskIsolation:
         assert get_response.json()["error"]["code"] == -32001
 
 
+class TestSubscribeToTask:
+    def test_subscribe_to_unknown_task_is_authenticated_jsonrpc_error(
+        self, rsa_keypair, client
+    ):
+        token_a = make_token(rsa_keypair)
+        response = client.post(
+            "/a2a",
+            json={
+                "jsonrpc": "2.0",
+                "id": "sub-1",
+                "method": "SubscribeToTask",
+                "params": {"id": "does-not-exist"},
+            },
+            headers=auth_headers(token_a),
+        )
+        assert response.status_code == 200
+        body = response.json()
+        # Method is wired and auth-gated; unknown tasks surface as JSON-RPC errors
+        # (not HTTP 401/404). Terminal-task subscribe is rejected by the SDK
+        # (-32602); missing tasks use the task-not-found code.
+        assert "error" in body
+        assert body["error"]["code"] in (-32001, -32602)
+
+    def test_subscribe_requires_auth(self, client):
+        response = client.post(
+            "/a2a",
+            json={
+                "jsonrpc": "2.0",
+                "id": "sub-1",
+                "method": "SubscribeToTask",
+                "params": {"id": "any"},
+            },
+            headers={a2a_auth.CLUSTER_HEADER_NAME: CLUSTER_ID, "A2A-Version": PROTOCOL_VERSION_1_0},
+        )
+        assert response.status_code == 401
+
+
 class TestCancellation:
     @pytest.mark.asyncio
     async def test_cancel_reports_unsupported_rather_than_pretending_to_work(self):
         with pytest.raises(UnsupportedOperationError):
             await a2a_executor.OLSAgentExecutor().cancel(None, None)
+
+    def test_cancel_task_jsonrpc_reports_unsupported(self, rsa_keypair, client, monkeypatch):
+        _stub_generate_response(monkeypatch, "answer")
+        token_a = make_token(rsa_keypair)
+        send_response = client.post("/a2a", json=send_message_body(), headers=auth_headers(token_a))
+        task_id = send_response.json()["result"]["task"]["id"]
+
+        cancel_response = client.post(
+            "/a2a",
+            json={
+                "jsonrpc": "2.0",
+                "id": "cancel-1",
+                "method": "CancelTask",
+                "params": {"id": task_id},
+            },
+            headers=auth_headers(token_a),
+        )
+        assert cancel_response.status_code == 200
+        body = cancel_response.json()
+        assert "error" in body
+
+
+class TestTokenExchangeFailure:
+    def test_exchange_failure_fails_task(self, rsa_keypair, client, monkeypatch):
+        _stub_generate_response(monkeypatch, "unused")
+        monkeypatch.setattr(
+            a2a_auth.A2AAuthenticator,
+            "exchange_for_mcp",
+            AsyncMock(side_effect=a2a_auth.A2AExchangeError("exchange failed")),
+        )
+        token_a = make_token(rsa_keypair)
+        response = client.post("/a2a", json=send_message_body(), headers=auth_headers(token_a))
+        assert response.status_code == 200
+        task = response.json()["result"]["task"]
+        assert task["status"]["state"] == "TASK_STATE_FAILED"
+        assert "OpenShift MCP" in task["status"]["message"]["parts"][0]["text"]
+
+
+class TestProgressChunks:
+    def test_tool_call_progress_is_streamed_as_working_update(
+        self, rsa_keypair, client, monkeypatch
+    ):
+        async def progress_stream():
+            yield StreamedChunk(
+                type=StreamChunkType.TOOL_CALL,
+                data={"tool_name": "get_pod"},
+            )
+            yield StreamedChunk(type=StreamChunkType.TEXT, text="done")
+            yield StreamedChunk(
+                type=StreamChunkType.END,
+                data={"rag_chunks": [], "truncated": False, "token_counter": TokenCounter()},
+            )
+
+        monkeypatch.setattr(
+            a2a_executor, "generate_response", lambda *a, **k: progress_stream()
+        )
+        token_a = make_token(rsa_keypair)
+        body = send_message_body(method="SendStreamingMessage")
+
+        with client.stream("POST", "/a2a", json=body, headers=auth_headers(token_a)) as response:
+            assert response.status_code == 200
+            events = [json.loads(line[len("data: "):]) for line in response.iter_lines() if line]
+
+        working_metas = [
+            event["result"].get("statusUpdate", {}).get("metadata", {})
+            for event in events
+            if event["result"].get("statusUpdate", {}).get("status", {}).get("state")
+            == "TASK_STATE_WORKING"
+        ]
+        assert any(meta.get("a2a_event_type") == "tool_call" for meta in working_metas)
+
+
+class TestMissingEndChunk:
+    def test_missing_end_chunk_fails_task(self, rsa_keypair, client, monkeypatch):
+        async def truncated_stream():
+            yield StreamedChunk(type=StreamChunkType.TEXT, text="partial")
+
+        monkeypatch.setattr(
+            a2a_executor, "generate_response", lambda *a, **k: truncated_stream()
+        )
+        token_a = make_token(rsa_keypair)
+        response = client.post("/a2a", json=send_message_body(), headers=auth_headers(token_a))
+        assert response.status_code == 200
+        task = response.json()["result"]["task"]
+        assert task["status"]["state"] == "TASK_STATE_FAILED"
+        assert "without a final response" in task["status"]["message"]["parts"][0]["text"]
+
+
+class TestMisconfiguration:
+    def test_missing_a2a_settings_returns_503_on_rpc(self, client, monkeypatch):
+        monkeypatch.setattr(a2a_auth, "_authenticator", None)
+
+        def boom():
+            raise a2a_auth.A2AConfigurationError("A2A_KEYCLOAK_ISSUER_URL must be configured")
+
+        monkeypatch.setattr(a2a_auth, "get_authenticator", boom)
+        response = client.post(
+            "/a2a",
+            json=send_message_body(),
+            headers={
+                a2a_auth.CLUSTER_HEADER_NAME: CLUSTER_ID,
+                "A2A-Version": PROTOCOL_VERSION_1_0,
+                "Authorization": "Bearer unused",
+            },
+        )
+        assert response.status_code == 503
+        assert response.json()["detail"] == "A2A is not configured"

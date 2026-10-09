@@ -19,14 +19,16 @@ call, and only that token (never the caller's own) reaches
 ``generate_response``. ``generate_response`` and
 ``response_processing_wrapper`` ensure A2A requests share OLS's normal request
 validation, redaction, quota, audit, and storage behavior. The ``ols_mode``
-message-metadata extension selects ASK or TROUBLESHOOTING (default);
+message-metadata extension selects ASK or TROUBLESHOOTING (default ASK);
 ``client_headers`` is always ``None``, so A2A metadata cannot override MCP
-credentials.
+credentials. A2A ``contextId`` is mapped to an owned OLS conversation id so
+multi-turn history continues across messages in the same context.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -55,8 +57,9 @@ logger = logging.getLogger(__name__)
 # in one task appends to this same artifact, so a client accumulates them
 # into one coherent answer instead of several unrelated artifacts.
 _ANSWER_ARTIFACT_ID = "answer"
-_OLS_MODE_METADATA_KEY = "ols_mode"
-_DEFAULT_A2A_MODE = QueryMode.TROUBLESHOOTING
+OLS_MODE_METADATA_KEY = "ols_mode"
+QUERY_MODE_EXTENSION_URI = "https://openshift.io/ols/a2a/extensions/query-mode/v1"
+_DEFAULT_A2A_MODE = QueryMode.ASK
 
 # Chunk types that only carry progress telemetry, not user-visible answer
 # text -- surfaced as TASK_STATE_WORKING status updates with the chunk's own
@@ -67,8 +70,41 @@ _PROGRESS_CHUNK_TYPES = frozenset(
         StreamChunkType.TOOL_RESULT,
         StreamChunkType.REASONING,
         StreamChunkType.SKILL_SELECTED,
+        StreamChunkType.HISTORY_COMPRESSION_START,
+        StreamChunkType.HISTORY_COMPRESSION_END,
     }
 )
+
+# Maps (task_scope, a2a_context_id) -> OLS conversation SUID. Process-local,
+# matching InMemoryTaskStore's single-replica constraint. Never use the raw
+# A2A contextId as the conversation id: it may not be a SUID, and ownership
+# must stay bound to the authenticated caller.
+_context_conversations: dict[tuple[str, str], str] = {}
+_context_conversations_lock = threading.Lock()
+
+
+def clear_context_conversations() -> None:
+    """Clear the in-process A2A context→conversation map (tests only)."""
+    with _context_conversations_lock:
+        _context_conversations.clear()
+
+
+def _lookup_conversation_id(task_scope: str, context_id: str | None) -> str | None:
+    """Return the OLS conversation id previously bound to this A2A context."""
+    if not context_id:
+        return None
+    with _context_conversations_lock:
+        return _context_conversations.get((task_scope, context_id))
+
+
+def _remember_conversation_id(
+    task_scope: str, context_id: str | None, conversation_id: str
+) -> None:
+    """Bind an A2A context to an OLS conversation for subsequent turns."""
+    if not context_id:
+        return
+    with _context_conversations_lock:
+        _context_conversations[(task_scope, context_id)] = conversation_id
 
 
 @dataclass
@@ -137,8 +173,11 @@ class OLSAgentExecutor(AgentExecutor):
             return
 
         user_id = _derive_user_id(caller)
+        conversation_id = _lookup_conversation_id(caller.task_scope, context.context_id)
         try:
-            llm_request = LLMRequest(query=text, conversation_id=None, mode=mode)
+            llm_request = LLMRequest(
+                query=text, conversation_id=conversation_id, mode=mode
+            )
             # Reuse OLS's ordinary request validation/redaction/quota gate.
             # The exchanged MCP token is installed after that gate succeeds.
             processed_request = process_request(
@@ -149,10 +188,8 @@ class OLSAgentExecutor(AgentExecutor):
             _audit("error", action="validate OLS query")
             await updater.failed(updater.new_agent_message([Part(text=_http_error_message(error))]))
             return
-        except Exception as error:
-            logger.error(
-                "A2A OLS request validation failed: %s", type(error).__name__
-            )
+        except Exception:
+            logger.error("A2A OLS request validation failed", exc_info=True)
             _audit("error", action="validate OLS query")
             await updater.failed(
                 updater.new_agent_message(
@@ -160,6 +197,10 @@ class OLSAgentExecutor(AgentExecutor):
                 )
             )
             return
+
+        _remember_conversation_id(
+            caller.task_scope, context.context_id, processed_request.conversation_id
+        )
 
         try:
             exchanged_token = await a2a_auth.get_authenticator().exchange_for_mcp(caller)
@@ -350,11 +391,11 @@ def _validated_text_input(context: RequestContext) -> str:
 
 
 def _requested_mode(context: RequestContext) -> QueryMode:
-    """Read the optional OLS mode extension from A2A message metadata."""
+    """Read the optional OLS mode from A2A message metadata (query-mode extension)."""
     metadata = context.message.metadata
     fields = getattr(metadata, "fields", None)
     if fields is not None:
-        mode_value = fields.get(_OLS_MODE_METADATA_KEY) if fields is not None else None
+        mode_value = fields.get(OLS_MODE_METADATA_KEY) if fields is not None else None
         if mode_value is None:
             raw_mode = None
         elif mode_value.WhichOneof("kind") != "string_value":
@@ -362,7 +403,7 @@ def _requested_mode(context: RequestContext) -> QueryMode:
         else:
             raw_mode = mode_value.string_value
     elif isinstance(metadata, Mapping):
-        raw_mode = metadata.get(_OLS_MODE_METADATA_KEY)
+        raw_mode = metadata.get(OLS_MODE_METADATA_KEY)
     else:
         raw_mode = None
 

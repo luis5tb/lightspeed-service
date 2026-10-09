@@ -151,3 +151,9 @@ mcp_servers:
     headers:
       Authorization: kubernetes  # Special placeholder - uses k8s token from request
     # timeout: 30  # Optional timeout in seconds
+
+# A2A (Agent2Agent) server surface for ACME. Disabled by default. When enabled,
+# also set A2A_KEYCLOAK_ISSUER_URL, A2A_CLUSTER_ID, and A2A_RPC_URL (and related
+# SPIFFE/Keycloak env vars). A2A_ENABLED=true/false overrides this flag.
+# a2a:
+#   enabled: false

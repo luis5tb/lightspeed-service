@@ -12,35 +12,35 @@ things into it:
   reusing ``a2a_auth.py`` unchanged.
 * ``InMemoryTaskStore`` with an owner-resolver -- per-(caller, cluster) task
   isolation, so a task created by one caller is reported as not-found (not
-  merely forbidden) to any other, exactly as the previous hand-rolled
-  dispatcher's bespoke ``_lookup_task`` check did.
+  merely forbidden) to any other.
 
-Exposes the same two routes as before:
+Exposes:
 
 * ``GET /.well-known/agent-card.json`` -- public, unauthenticated discovery
   document.
-* ``POST /`` -- the JSON-RPC 2.0 endpoint, now supporting the full real
-  method set ACME's pinned ``a2a-sdk`` client can use: ``SendMessage``,
+* ``POST /a2a`` -- the JSON-RPC 2.0 endpoint, supporting ``SendMessage``,
   ``SendStreamingMessage`` (real SSE streaming of task status/artifact
-  updates -- OLS's existing token-by-token LLM streaming, not a buffered
-  response relabeled), ``GetTask``, and ``SubscribeToTask``. ``CancelTask``
-  is accepted but always reports unsupported (see ``a2a_executor.py``).
+  updates), ``GetTask``, and ``SubscribeToTask``. ``CancelTask`` is accepted
+  but always reports unsupported (see ``a2a_executor.py``).
 
 Every RPC call is authenticated and cluster-scoped (see ``a2a_auth.py``)
-*before* the SDK's dispatcher runs any logic, and ``OLSAgentExecutor``
+before the SDK's dispatcher runs any logic, and ``OLSAgentExecutor``
 performs a fresh RFC 8693 token exchange per request so OLS's MCP client only
 ever sees the exchanged token -- never the original caller's token.
 
-Task/conversation state is held in this process only (``InMemoryTaskStore``);
-it does not survive a restart and is not shared across replicas. A
-persistent, multi-replica-safe task store is tracked as later work.
+Task state is held in this process only (``InMemoryTaskStore``); it does not
+survive a restart and is not shared across replicas. Deployments that enable
+A2A must run a single replica until a durable task store is available.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 
 from fastapi import FastAPI, HTTPException
+from google.protobuf.json_format import ParseDict
+from google.protobuf.struct_pb2 import Struct
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -53,19 +53,47 @@ from a2a.server.routes.common import ServerCallContextBuilder
 from a2a.server.routes.fastapi_routes import add_a2a_routes_to_fastapi
 from a2a.server.routes.jsonrpc_routes import create_jsonrpc_routes
 from a2a.server.tasks import InMemoryTaskStore
-from a2a.types.a2a_pb2 import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+from a2a.types.a2a_pb2 import (
+    AgentCapabilities,
+    AgentCard,
+    AgentExtension,
+    AgentInterface,
+    AgentSkill,
+)
 from a2a.utils.constants import PROTOCOL_VERSION_1_0
 
 from ols.app.endpoints import a2a_auth
-from ols.app.endpoints.a2a_auth import CallerIdentity
-from ols.app.endpoints.a2a_executor import OLSAgentExecutor
+from ols.app.endpoints.a2a_auth import A2AConfigurationError, CallerIdentity
+from ols.app.endpoints.a2a_executor import (
+    OLS_MODE_METADATA_KEY,
+    OLSAgentExecutor,
+    QUERY_MODE_EXTENSION_URI,
+)
 
 logger = logging.getLogger(__name__)
 
-# The only path carrying A2A JSON-RPC traffic on this app; everything else
-# (the agent card, /v1/*, /health, /metrics, ...) is untouched by
-# A2AAuthMiddleware below.
-_RPC_PATH = "/"
+# JSON-RPC lives under /a2a so auth middleware can match a stable prefix and
+# does not collide with other root-level routes (health, metrics, authorized).
+_RPC_PATH = "/a2a"
+
+_NOT_CONFIGURED_DETAIL = "A2A is not configured"
+
+
+def is_a2a_enabled() -> bool:
+    """Return whether the A2A server surface should be mounted.
+
+    ``A2A_ENABLED`` env (``true``/``false``) overrides olsconfig when set,
+    so ACME charts can toggle the surface without rewriting YAML. When the
+    env var is unset, ``a2a.enabled`` from olsconfig is used (default False).
+    """
+    env = os.environ.get("A2A_ENABLED", "").strip().lower()
+    if env in {"1", "true", "yes", "on"}:
+        return True
+    if env in {"0", "false", "no", "off"}:
+        return False
+    from ols import config
+
+    return bool(config.a2a.enabled)
 
 
 class _A2AUser(User):
@@ -92,11 +120,7 @@ class A2AAuthMiddleware(BaseHTTPMiddleware):
     the real a2a-sdk's routes bypass FastAPI's own dependency-injection
     machinery entirely (``a2a.server.routes.fastapi_routes._A2ARoute`` uses
     Starlette's ``request_response`` directly, specifically to skip it), so
-    a ``Depends()`` on one of these routes would simply never run. Plain
-    ``app.add_middleware()`` wraps the whole ASGI app ahead of routing
-    regardless, which is exactly where this app's own
-    ``_RequestBodyLimitMiddleware`` and ``@app.middleware`` functions already
-    operate (see ``ols/app/main.py``) -- same layer, same pattern.
+    a ``Depends()`` on one of these routes would simply never run.
 
     Scoped to ``_RPC_PATH`` only: the agent-card route is, and must remain,
     public, and every other route on this app has its own (``k8s``-based)
@@ -105,12 +129,16 @@ class A2AAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         """Validate the caller, then forward (or reject) the request."""
-        if request.url.path != _RPC_PATH or request.method != "POST":
+        path = request.url.path.rstrip("/") or "/"
+        if path != _RPC_PATH or request.method != "POST":
             return await call_next(request)
         try:
             caller = await a2a_auth.get_authenticator().authenticate_caller(request)
         except HTTPException as error:
             return JSONResponse({"detail": error.detail}, status_code=error.status_code)
+        except A2AConfigurationError:
+            logger.error("A2A requested but required configuration is missing")
+            return JSONResponse({"detail": _NOT_CONFIGURED_DETAIL}, status_code=503)
         request.state.caller = caller
         return await call_next(request)
 
@@ -142,6 +170,33 @@ class _A2ACallContextBuilder(ServerCallContextBuilder):
         )
 
 
+def _query_mode_extension() -> AgentExtension:
+    """Build the OLS query-mode AgentExtension for the public agent card."""
+    params = ParseDict(
+        {
+            "modes": ["ask", "troubleshooting"],
+            "defaultMode": "ask",
+            "metadataKey": OLS_MODE_METADATA_KEY,
+        },
+        Struct(),
+    )
+    return AgentExtension(
+        uri=QUERY_MODE_EXTENSION_URI,
+        description="Selects the OLS query mode for a message.",
+        required=False,
+        params=params,
+    )
+
+
+def _agent_capabilities() -> AgentCapabilities:
+    """Capabilities shared by the static handler card and the public card."""
+    return AgentCapabilities(
+        streaming=True,
+        push_notifications=False,
+        extensions=[_query_mode_extension()],
+    )
+
+
 def _static_capabilities_card() -> AgentCard:
     """Build the minimal ``AgentCard`` the SDK's request handler needs at startup.
 
@@ -152,7 +207,7 @@ def _static_capabilities_card() -> AgentCard:
     Those require ``A2ASettings.from_env()``, which must stay lazy (see
     ``_build_agent_card``), so this intentionally does not call it.
     """
-    return AgentCard(capabilities=AgentCapabilities(streaming=True, push_notifications=False))
+    return AgentCard(capabilities=_agent_capabilities())
 
 
 def _build_agent_card() -> AgentCard:
@@ -163,18 +218,16 @@ def _build_agent_card() -> AgentCard:
     depends on ``A2ASettings.from_env()``, which raises
     ``A2AConfigurationError`` if the deployment-specific
     ``A2A_KEYCLOAK_ISSUER_URL``/``A2A_CLUSTER_ID``/``A2A_RPC_URL`` env vars
-    are unset. A deployment that never configures A2A at all (``appServerPatch``
-    disabled) must still be able to start OLS -- only a request actually
-    hitting this endpoint should fail.
-
-    A real ``a2a.types.a2a_pb2.AgentCard`` protobuf message, serialized by
-    the SDK's own ``agent_card_to_dict`` -- no more guessing the wire shape
-    by hand.
+    are unset.
     """
     settings = a2a_auth.get_authenticator().settings
+    description = (
+        f"{settings.agent_description} "
+        "Task state is process-local (single-replica A2A deployments only)."
+    )
     return AgentCard(
         name=settings.agent_name,
-        description=settings.agent_description,
+        description=description,
         version="1.0.0",
         supported_interfaces=[
             AgentInterface(
@@ -183,7 +236,7 @@ def _build_agent_card() -> AgentCard:
                 protocol_version=PROTOCOL_VERSION_1_0,
             )
         ],
-        capabilities=AgentCapabilities(streaming=True, push_notifications=False),
+        capabilities=_agent_capabilities(),
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
         skills=[
@@ -192,8 +245,8 @@ def _build_agent_card() -> AgentCard:
                 name="Ask OpenShift Lightspeed",
                 description=(
                     "Answer general questions about OpenShift and related "
-                    "Red Hat products. Select this mode with message metadata "
-                    "ols_mode=ask."
+                    "Red Hat products. This is the default mode; select it with "
+                    f"message metadata {OLS_MODE_METADATA_KEY}=ask."
                 ),
                 tags=["openshift", "ask"],
             ),
@@ -203,8 +256,7 @@ def _build_agent_card() -> AgentCard:
                 description=(
                     "Diagnose live issues in the OpenShift cluster this service "
                     "is configured for, using that cluster's own MCP tools. "
-                    "This is the default mode; select it with message metadata "
-                    "ols_mode=troubleshooting."
+                    f"Select it with message metadata {OLS_MODE_METADATA_KEY}=troubleshooting."
                 ),
                 tags=["openshift", "troubleshooting", "diagnostics"],
             ),
@@ -228,11 +280,16 @@ def _owner_from_context(context: ServerCallContext) -> str:
 def register_routes(app: FastAPI) -> None:
     """Mount the A2A agent-card and JSON-RPC routes directly on ``app``.
 
-    Called from ``ols/app/routers.py`` instead of ``app.include_router(...)``:
-    the real a2a-sdk appends raw Starlette routes straight onto ``app.routes``
+    Called from ``ols/app/routers.py`` only when ``is_a2a_enabled()`` is true.
+    The real a2a-sdk appends raw Starlette routes straight onto ``app.routes``
     (see ``add_a2a_routes_to_fastapi``), so it needs the actual ``FastAPI``
     app object, not an ``APIRouter``.
     """
+    logger.warning(
+        "A2A enabled with InMemoryTaskStore: use a single replica until a "
+        "durable task store is available (GetTask/SubscribeToTask are not "
+        "multi-replica safe)"
+    )
     app.add_middleware(A2AAuthMiddleware)
 
     static_card = _static_capabilities_card()
@@ -243,7 +300,10 @@ def register_routes(app: FastAPI) -> None:
     )
 
     async def _card_modifier(_card: AgentCard) -> AgentCard:
-        return _build_agent_card()
+        try:
+            return _build_agent_card()
+        except A2AConfigurationError as error:
+            raise HTTPException(status_code=503, detail=_NOT_CONFIGURED_DETAIL) from error
 
     add_a2a_routes_to_fastapi(
         app,
