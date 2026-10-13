@@ -244,7 +244,7 @@ DEFAULT_AUTHENTICATION_MODULE = "k8s"
 NOOP_WITH_TOKEN_AUTHENTICATION_MODULE = "noop-with-token"  # noqa: S105
 
 # All supported authentication modules
-SUPPORTED_AUTHENTICATION_MODULES = {"k8s", "noop", "noop-with-token"}
+SUPPORTED_AUTHENTICATION_MODULES = {"k8s", "oidc", "noop", "noop-with-token"}
 
 # Default configuration file name
 DEFAULT_CONFIGURATION_FILE = "olsconfig.yaml"

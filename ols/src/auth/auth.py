@@ -4,7 +4,7 @@ import logging
 
 from ols.app.models.config import OLSConfig
 
-from . import k8s, noop, noop_with_token
+from . import k8s, noop, noop_with_token, oidc
 from .auth_dependency_interface import AuthDependencyInterface
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,10 @@ def get_auth_dependency(
     match module:
         case "k8s":
             return k8s.AuthDependency(virtual_path=virtual_path)
+        case "oidc":
+            return oidc.AuthDependency(
+                ols_config.authentication_config, virtual_path=virtual_path
+            )
         case "noop":
             return noop.AuthDependency(virtual_path=virtual_path)
         case "noop-with-token":

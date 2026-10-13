@@ -20,7 +20,7 @@ These specs define the requirements, behaviors, and architecture for the OLS lig
 | [conversation-history.md](what/conversation-history.md) | Storage backends, CRUD operations, compression, user isolation, concurrency |
 | [llm-providers.md](what/llm-providers.md) | Provider contract, 10 provider types with deviations, parameter system, reasoning models |
 | [rag.md](what/rag.md) | Document retrieval via FAISS, multi-index, BYOK, hybrid RAG (tool/skill filtering only) |
-| [auth.md](what/auth.md) | Three auth modules (k8s, noop, noop-with-token), permission scopes, user identity |
+| [auth.md](what/auth.md) | Four auth modules (k8s, oidc, noop, noop-with-token), permission scopes, user identity |
 | [tools.md](what/tools.md) | MCP tool integration: gathering, execution, token budget, filtering, approval workflow |
 | [skills.md](what/skills.md) | Skill discovery, selection via hybrid RAG, file concatenation, prompt injection |
 | [quota.md](what/quota.md) | Token usage limits per user and cluster, scheduler, usage history |

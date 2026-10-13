@@ -142,27 +142,27 @@ def resolve_headers(
     Args:
         headers: Map of header names to secret locations or special keywords.
             - If value is "kubernetes": preserved unchanged for later substitution during request.
-              Only valid when authentication module is "k8s" or "noop-with-token".
+              Valid when authentication provides a caller bearer token: "k8s", "oidc",
+              or "noop-with-token".
               "noop-with-token" is for testing only - the real k8s token must be passed at
               request time.
               If used with other auth modules, a warning is logged and the server is skipped.
             - If value is "client": preserved unchanged for later substitution during request.
             - Otherwise: Treated as file path and read the secret from that file.
-        auth_module: The authentication module being used (e.g., "k8s", "noop-with-token").
-            Used to validate that "kubernetes" placeholder is only used with appropriate auth
-            modules.
+        auth_module: The authentication module being used (e.g., "k8s", "oidc").
+            Used to validate that the "kubernetes" placeholder has a caller bearer token.
 
     Returns:
         Map of header names to resolved header values or special keywords.
         Returns empty dict if any header fails to resolve (kubernetes placeholder
-        with non-k8s/non-noop-with-token auth, or secret file cannot be read).
+        without token-providing auth, or secret file cannot be read).
 
     Examples:
         >>> # With file paths
         >>> resolve_headers({"Authorization": "/var/secrets/token"})
         {"Authorization": "secret-value-from-file"}
 
-        >>> # With kubernetes special case (kept as-is, requires k8s or noop-with-token auth)
+        >>> # With a token-providing auth module (k8s, oidc, or noop-with-token)
         >>> resolve_headers(
         ...     {"Authorization": "kubernetes"},
         ...     auth_module="k8s"
@@ -179,17 +179,16 @@ def resolve_headers(
     for header_name, header_value in headers.items():
         match header_value.strip():
             case constants.MCP_KUBERNETES_PLACEHOLDER:
-                # Validate that kubernetes placeholder is only used with k8s or noop-with-token auth
-                # (noop-with-token is allowed for testing purposes)
                 if auth_module not in (
                     constants.DEFAULT_AUTHENTICATION_MODULE,
+                    "oidc",
                     constants.NOOP_WITH_TOKEN_AUTHENTICATION_MODULE,
                 ):
                     logger.warning(
                         "MCP server authorization header '%s' uses '%s' placeholder, but "
                         "authentication module is '%s'. "
                         "The 'kubernetes' placeholder requires authentication module to be "
-                        "'%s' or '%s'. This MCP server will be skipped.",
+                        "'%s', 'oidc', or '%s'. This MCP server will be skipped.",
                         header_name,
                         constants.MCP_KUBERNETES_PLACEHOLDER,
                         auth_module,

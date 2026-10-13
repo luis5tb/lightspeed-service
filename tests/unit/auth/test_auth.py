@@ -3,7 +3,7 @@
 import pytest
 
 from ols.app.models.config import AuthenticationConfig, OLSConfig
-from ols.src.auth import k8s, noop, noop_with_token
+from ols.src.auth import k8s, noop, noop_with_token, oidc
 from ols.src.auth.auth import get_auth_dependency, use_k8s_auth
 
 
@@ -52,6 +52,19 @@ def test_get_auth_dependency_k8s_module():
     ols_config.authentication_config = AuthenticationConfig()
     ols_config.authentication_config.module = "k8s"
     assert isinstance(get_auth_dependency(ols_config, "/path"), k8s.AuthDependency)
+
+
+def test_get_auth_dependency_oidc_module():
+    """Select the OIDC dependency when the OIDC module is configured."""
+    ols_config = OLSConfig()
+    ols_config.authentication_config = AuthenticationConfig(
+        module="oidc",
+        oidc_issuer_url="https://issuer.example.com/realms/ols",
+        oidc_audience="lightspeed",
+    )
+    dependency = get_auth_dependency(ols_config, "/ols-metrics-access")
+    assert isinstance(dependency, oidc.AuthDependency)
+    assert dependency._virtual_path == "/ols-metrics-access"
 
 
 def test_get_auth_dependency_noop_with_token_module():

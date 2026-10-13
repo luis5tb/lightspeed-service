@@ -74,6 +74,13 @@ def test_resolve_headers_kubernetes_token_with_noop_with_token() -> None:
     assert result == {"Authorization": "kubernetes"}
 
 
+def test_resolve_headers_kubernetes_token_with_oidc() -> None:
+    """Keep the caller-token placeholder available when OIDC validates the bearer token."""
+    result = resolve_headers({"Authorization": "kubernetes"}, auth_module="oidc")
+
+    assert result == {"Authorization": "kubernetes"}
+
+
 def test_resolve_headers_multiple_headers(tmp_path: Path) -> None:
     """Test resolving multiple authorization headers."""
     # Create multiple secret files
@@ -127,14 +134,13 @@ def test_resolve_headers_file_read_error(tmp_path: Path) -> None:
     assert not result
 
 
-def test_resolve_headers_kubernetes_requires_k8s_auth(caplog) -> None:
-    """Test that kubernetes placeholder logs warning and returns empty dict with non-k8s auth."""
+def test_resolve_headers_kubernetes_requires_token_auth(caplog) -> None:
+    """Reject the request-token placeholder for auth modules without bearer tokens."""
     headers = {"Authorization": "kubernetes"}
 
     result = resolve_headers(headers, auth_module="azure")
 
     # Should return empty dict when kubernetes placeholder used with
-    # non-k8s/non-noop_with_token auth
     assert result == {}
     assert "kubernetes" in caplog.text.lower()
     assert "k8s" in caplog.text

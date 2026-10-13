@@ -28,7 +28,7 @@ OpenShift LightSpeed (OLS) is a FastAPI service organized into four layers: `app
 
 | Path | Purpose |
 |---|---|
-| `src/auth/auth.py` | `get_auth_dependency(ols_config, virtual_path)` factory that returns the configured `AuthDependencyInterface` implementation based on the `authentication_config.module` setting (`k8s`, `noop`, or `noop-with-token`). |
+| `src/auth/auth.py` | `get_auth_dependency(ols_config, virtual_path)` factory that returns the configured `AuthDependencyInterface` implementation based on the `authentication_config.module` setting (`k8s`, `oidc`, `noop`, or `noop-with-token`). |
 | `src/auth/auth_dependency_interface.py` | Abstract base class `AuthDependencyInterface(ABC)` -- all auth implementations must satisfy `async __call__(request) -> tuple[str, str, bool, str]` returning (user_id, user_name, skip_user_id_check, user_token). |
 | `src/auth/k8s.py` | Kubernetes TokenReview-based authentication. Contains `K8sClientSingleton` for cluster ID and version retrieval. |
 | `src/auth/noop.py` | No-op auth for local development (uses default user identity). |

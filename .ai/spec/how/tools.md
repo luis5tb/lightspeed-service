@@ -26,7 +26,7 @@ olsconfig.yaml (mcp_servers section)
   -> build_mcp_config(servers_list, user_token, client_headers)
      -> For each server:
         resolve_server_headers: substitute placeholders in header values
-          "kubernetes" -> "Bearer {user_token}" (k8s service account token)
+          "kubernetes" -> "Bearer {user_token}" (validated caller token)
           "client"     -> value from client_headers[server_name][header_name]
           other        -> literal value (resolved at config load from file/env)
         Build MCPServerTransport dict: transport="streamable_http", url, headers, timeout
@@ -184,7 +184,7 @@ arbitrarily large raw tool outputs before they even reach the budget enforcer.
 ### Header Placeholder Resolution
 
 MCP server headers support three resolution modes in `resolve_header_value`:
-- `"kubernetes"` -- replaced with `"Bearer {user_token}"` from the request's k8s service account token
+- `"kubernetes"` -- replaced with `"Bearer {user_token}"` from the request's validated caller token
 - `"client"` -- replaced with the value from `client_headers[server_name][header_name]`, passed in the request body
 - Any other value -- used as-is (resolved at config load time, e.g., from file or environment variable)
 

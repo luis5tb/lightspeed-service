@@ -66,8 +66,8 @@ The service must protect customer data, enforce transport-layer encryption, reda
 
 ### MCP credential handling
 
-35. MCP server authorization headers support three resolution modes: (a) a file path, whose contents are read at config load time; (b) the `kubernetes` placeholder, which is replaced at request time with a `Bearer <token>` derived from the authenticated user's Kubernetes token; (c) the `client` placeholder, which is replaced at request time with a header value supplied by the calling client.
-36. The `kubernetes` placeholder must only be permitted when the authentication module is `k8s` or `noop-with-token`. If used with any other authentication module, the MCP server must be excluded at config validation time.
+35. MCP server authorization headers support three resolution modes: (a) a file path, whose contents are read at config load time; (b) the `kubernetes` placeholder, which is replaced at request time with `Bearer <token>` from the authenticated request; (c) the `client` placeholder, which is replaced at request time with a header value supplied by the calling client.
+36. The `kubernetes` placeholder must only be permitted when the authentication module is `k8s`, `oidc`, or `noop-with-token`. If used with any other authentication module, the MCP server must be excluded at config validation time.
 37. MCP connections must use the aggregated certificate store when a certificate directory is configured, ensuring custom CA certificates apply to MCP server communication.
 38. [PLANNED: OLS-2717] MCP servers (including openshift-mcp-server) must support TLS-encrypted connections.
 
@@ -116,7 +116,7 @@ The service must protect customer data, enforce transport-layer encryption, reda
 - The redacted header sets for request logging (`authorization`, `proxy-authorization`, `cookie`) and response logging (`www-authenticate`, `proxy-authenticate`, `set-cookie`) are fixed and not configurable.
 - Tool approval state is ephemeral (in-memory, per-process). A restart clears all pending approvals.
 - The approval timeout prevents indefinite waits: if no decision arrives, the tool call is not executed (fail-closed).
-- The `kubernetes` MCP header placeholder is valid only with `k8s` or `noop-with-token` authentication modules. Other modules cause the server to be excluded.
+- The `kubernetes` MCP header placeholder is valid only with `k8s`, `oidc`, or `noop-with-token` authentication modules. Other modules cause the server to be excluded.
 - CA trust for all outbound connections (LLM providers, MCP servers, OTLP gRPC) is handled via the `SSL_CERT_FILE` environment variable set by the operator. For gRPC, `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` is set from `SSL_CERT_FILE` at startup.
 - Containers must operate with a read-only root filesystem; writable paths are limited to explicitly mounted volumes.
 

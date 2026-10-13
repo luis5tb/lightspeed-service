@@ -5,6 +5,7 @@ import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, Request
+from starlette.concurrency import run_in_threadpool
 
 from ols import config
 from ols.app.models.models import (
@@ -40,7 +41,7 @@ authorized_responses: dict[int | str, dict[str, Any]] = {
 
 
 @router.post("/authorized", responses=authorized_responses)
-def is_user_authorized(
+async def is_user_authorized(
     request: Request, user_id: Optional[str] = None
 ) -> AuthorizationResponse:
     """Validate if the logged-in user is authorized to access OLS.
@@ -56,7 +57,11 @@ def is_user_authorized(
 
     """
     # we don't care about the user-token here - hence the _
-    user_id, username, skip_user_id_check, _ = asyncio.run(auth_dependency(request))
+    if config.ols_config.authentication_config.module == "k8s":
+        auth_result = await run_in_threadpool(asyncio.run, auth_dependency(request))
+    else:
+        auth_result = await auth_dependency(request)
+    user_id, username, skip_user_id_check, _ = auth_result
     return AuthorizationResponse(
         user_id=user_id,
         username=username,

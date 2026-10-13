@@ -3686,6 +3686,76 @@ def test_authentication_config_wrong_module():
         cfg.validate_yaml()
 
 
+def test_authentication_config_oidc_requires_issuer_and_audience():
+    """Require an issuer and audience when OIDC is the selected auth module."""
+    cfg = AuthenticationConfig(module="oidc")
+    with pytest.raises(InvalidConfigurationError, match="oidc_issuer_url is required"):
+        cfg.validate_yaml()
+
+    cfg = AuthenticationConfig(
+        module="oidc", oidc_issuer_url="https://issuer.example.com/realms/ols"
+    )
+    with pytest.raises(InvalidConfigurationError, match="oidc_audience is required"):
+        cfg.validate_yaml()
+
+    cfg = AuthenticationConfig(
+        module="oidc",
+        oidc_issuer_url="http://issuer.example.com/realms/ols",
+        oidc_audience="lightspeed",
+    )
+    with pytest.raises(
+        InvalidConfigurationError,
+        match="oidc_issuer_url must be a valid HTTPS issuer URL",
+    ):
+        cfg.validate_yaml()
+
+
+def test_authentication_config_oidc_accepts_issuer_and_audience():
+    """Accept complete OIDC auth configuration and defaults."""
+    cfg = AuthenticationConfig(
+        module="oidc",
+        oidc_issuer_url="https://issuer.example.com/realms/ols",
+        oidc_audience="lightspeed",
+    )
+
+    cfg.validate_yaml()
+    assert cfg.oidc_username_claim == "preferred_username"
+    assert cfg.oidc_jwks_cache_seconds == 300
+    assert cfg.oidc_metrics_access_claim is None
+    assert cfg.oidc_metrics_access_value is None
+
+
+def test_authentication_config_oidc_preserves_bare_host_issuer():
+    """Preserve the exact OIDC issuer identifier for discovery and JWT checks."""
+    issuer = "https://issuer.example.com"
+    cfg = AuthenticationConfig(
+        module="oidc", oidc_issuer_url=issuer, oidc_audience="lightspeed"
+    )
+
+    cfg.validate_yaml()
+
+    assert cfg.oidc_issuer_url == issuer
+
+
+def test_authentication_config_oidc_metrics_access_requires_claim_and_value():
+    """Require both a claim name and value for explicit OIDC metrics access."""
+    cfg = AuthenticationConfig(
+        module="oidc",
+        oidc_issuer_url="https://issuer.example.com/realms/ols",
+        oidc_audience="lightspeed",
+        oidc_metrics_access_claim="groups",
+    )
+
+    with pytest.raises(
+        InvalidConfigurationError,
+        match="oidc_metrics_access_claim and oidc_metrics_access_value",
+    ):
+        cfg.validate_yaml()
+
+    cfg.oidc_metrics_access_value = "metrics-readers"
+    cfg.validate_yaml()
+
+
 def test_authentication_config_k8s_cluster_api():
     """Test method to validate authentication config."""
     # k8s_cluster_api is optional

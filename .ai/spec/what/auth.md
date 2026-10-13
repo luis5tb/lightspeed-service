@@ -4,7 +4,7 @@ Control which users can access the OpenShift LightSpeed service and what they ar
 
 ## Behavioral Rules
 
-1. The system must support exactly three authentication modules: `k8s`, `noop`, and `noop-with-token`.
+1. The system must support the authentication modules: `k8s`, `oidc`, `noop`, and `noop-with-token`.
 2. The authentication module must be selected once at startup from configuration and must not change for the lifetime of the process.
 3. If no authentication module is specified in configuration, the system must default to `k8s`.
 4. If an unsupported module value is specified, the system must reject the configuration at startup.
@@ -38,6 +38,24 @@ Control which users can access the OpenShift LightSpeed service and what they ar
 23. If the header is present but contains no valid bearer token, the system must reject the request with HTTP 400.
 24. The system must accept an optional `user_id` query parameter; when absent, it must use the default nil UUID identity.
 25. The system must allow callers to override the user ID (the skip-user-ID-check flag must be true).
+
+### oidc Module (JWT Authentication)
+
+The OIDC module validates bearer JWTs using the configured issuer's discovery
+document and JWKS. It accepts RS256 signatures only and validates issuer,
+audience, expiry, and the required `iat` and `sub` claims. The returned user ID
+is a stable UUID derived from issuer and subject; username comes from the
+configured claim, falling back to `sub`. The original caller token is returned
+for downstream MCP use. The issuer and discovered JWKS endpoint must use HTTPS;
+TLS verification is always enabled and is independent of the Kubernetes
+`skip_tls_verification` setting. The configured issuer is preserved exactly
+and must match the discovery issuer and token `iss` claim, including any path
+or trailing slash.
+
+OIDC access to the metrics scope (`/ols-metrics-access`) is denied unless the
+administrator configures a claim name/value pair. A matching string claim or a
+matching member of a string-list claim grants metrics access. This path-specific
+policy does not alter OIDC authorization for ordinary REST endpoints.
 
 ### Dev Auth Override
 
@@ -82,10 +100,16 @@ Control which users can access the OpenShift LightSpeed service and what they ar
 
 | Field path | Type | Default | Description |
 |---|---|---|---|
-| `ols_config.authentication_config.module` | string | `"k8s"` | Auth module: `k8s`, `noop`, or `noop-with-token` |
+| `ols_config.authentication_config.module` | string | `"k8s"` | Auth module: `k8s`, `oidc`, `noop`, or `noop-with-token` |
 | `ols_config.authentication_config.skip_tls_verification` | bool | `false` | Disable TLS verification for Kubernetes API calls |
 | `ols_config.authentication_config.k8s_cluster_api` | URL | (from kubeconfig) | Override Kubernetes API server URL |
 | `ols_config.authentication_config.k8s_ca_cert_path` | file path | (from kubeconfig) | Custom CA certificate for Kubernetes API TLS |
+| `ols_config.authentication_config.oidc_issuer_url` | URL | (required for `oidc`) | OpenID Connect issuer URL |
+| `ols_config.authentication_config.oidc_audience` | string | (required for `oidc`) | Required token audience |
+| `ols_config.authentication_config.oidc_username_claim` | string | `preferred_username` | Claim used as the returned username; falls back to `sub` |
+| `ols_config.authentication_config.oidc_jwks_cache_seconds` | positive integer | `300` | Discovery/JWKS cache lifetime |
+| `ols_config.authentication_config.oidc_metrics_access_claim` | string | (unset; metrics denied) | Claim name used for OIDC metrics access |
+| `ols_config.authentication_config.oidc_metrics_access_value` | string | (unset; metrics denied) | Required claim value for metrics access |
 | `dev_config.disable_auth` | bool | `false` | Bypass all auth checks (dev only) |
 | `dev_config.k8s_auth_token` | string | (none) | Override bearer token for Kubernetes API client initialization |
 | `ols_config.logging_config.suppress_auth_checks_warning_in_log` | bool | `false` | Suppress repeated auth-bypass warnings in dev mode |

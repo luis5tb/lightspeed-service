@@ -5,6 +5,7 @@ import os
 import re
 from enum import StrEnum
 from typing import Any, Optional, Self
+from urllib.parse import urlsplit
 
 from pydantic import (
     AnyHttpUrl,
@@ -218,6 +219,12 @@ class AuthenticationConfig(BaseModel):
     skip_tls_verification: bool = False
     k8s_cluster_api: Optional[AnyHttpUrl] = None
     k8s_ca_cert_path: Optional[FilePath] = None
+    oidc_issuer_url: Optional[str] = None
+    oidc_audience: Optional[str] = None
+    oidc_username_claim: str = "preferred_username"
+    oidc_jwks_cache_seconds: PositiveInt = 300
+    oidc_metrics_access_claim: Optional[str] = None
+    oidc_metrics_access_value: Optional[str] = None
 
     def validate_yaml(self) -> None:
         """Validate YAML containing authentication configuration section."""
@@ -227,6 +234,57 @@ class AuthenticationConfig(BaseModel):
             raise checks.InvalidConfigurationError(
                 f"invalid authentication module: {self.module}, supported modules are"
                 f" {constants.SUPPORTED_AUTHENTICATION_MODULES}"
+            )
+        if self.module == "oidc":
+            self._validate_oidc_settings()
+
+    def _validate_oidc_settings(self) -> None:
+        """Validate OIDC issuer, audience, and metrics permission settings."""
+        if not self.oidc_issuer_url:
+            raise checks.InvalidConfigurationError(
+                "oidc_issuer_url is required when authentication module is oidc"
+            )
+        try:
+            issuer_url = urlsplit(self.oidc_issuer_url)
+            issuer_host = issuer_url.hostname
+            issuer_url.port
+        except ValueError as error:
+            raise checks.InvalidConfigurationError(
+                "oidc_issuer_url must be a valid HTTPS issuer URL"
+            ) from error
+        if (
+            issuer_url.scheme != "https"
+            or not issuer_host
+            or issuer_url.username is not None
+            or issuer_url.password is not None
+            or issuer_url.query
+            or issuer_url.fragment
+        ):
+            raise checks.InvalidConfigurationError(
+                "oidc_issuer_url must be a valid HTTPS issuer URL"
+            )
+        if not self.oidc_audience or not self.oidc_audience.strip():
+            raise checks.InvalidConfigurationError(
+                "oidc_audience is required when authentication module is oidc"
+            )
+        if not self.oidc_username_claim.strip():
+            raise checks.InvalidConfigurationError(
+                "oidc_username_claim must not be empty"
+            )
+        if (self.oidc_metrics_access_claim is None) != (
+            self.oidc_metrics_access_value is None
+        ):
+            raise checks.InvalidConfigurationError(
+                "oidc_metrics_access_claim and oidc_metrics_access_value must be "
+                "configured together"
+            )
+        if self.oidc_metrics_access_claim is not None and not (
+            self.oidc_metrics_access_claim.strip()
+            and self.oidc_metrics_access_value
+            and self.oidc_metrics_access_value.strip()
+        ):
+            raise checks.InvalidConfigurationError(
+                "OIDC metrics access claim and value must not be empty"
             )
 
 

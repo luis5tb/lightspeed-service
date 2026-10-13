@@ -761,7 +761,7 @@ The service applies the following cross-cutting behaviors to all requests:
 ## Configuration Surface
 
 - `ols_config.default_provider` / `ols_config.default_model` -- default LLM provider and model when not specified in the request.
-- `ols_config.authentication_config.module` -- authentication module (`k8s`, `noop`, `noop-with-token`).
+- `ols_config.authentication_config.module` -- authentication module (`k8s`, `oidc`, `noop`, `noop-with-token`).
 - `ols_config.user_data_collection.feedback_disabled` -- disables feedback collection (POST /v1/feedback returns 403).
 - `ols_config.user_data_collection.transcripts_disabled` -- disables transcript storage after queries.
 - `ols_config.user_data_collection.feedback_storage` -- filesystem path for feedback JSON files.

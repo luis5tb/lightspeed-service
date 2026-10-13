@@ -87,7 +87,7 @@ def resolve_header_value(
         value: Header value (may be a placeholder or actual value)
         header_name: Name of the header
         server_name: Name of the MCP server (for logging)
-        user_token: User's kubernetes token (if available)
+        user_token: Validated caller token, if available.
         client_headers: Client-provided headers (if available)
 
     Returns:
@@ -95,11 +95,10 @@ def resolve_header_value(
     """
     match value:
         case constants.MCP_KUBERNETES_PLACEHOLDER:
-            # Replace "kubernetes" with actual k8s token
             if user_token:
                 return f"Bearer {user_token}"
             logger.warning(
-                "MCP server %s requires kubernetes token but none available",
+                "MCP server %s requires a caller token but none is available",
                 server_name,
             )
             return None
@@ -138,7 +137,7 @@ def resolve_server_headers(
 
     Args:
         server: MCP server configuration
-        user_token: User's kubernetes token (if available)
+        user_token: Validated caller token, if available.
         client_headers: Client-provided headers (if available)
 
     Returns:

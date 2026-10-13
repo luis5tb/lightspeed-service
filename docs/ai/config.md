@@ -105,6 +105,40 @@ Config classes have two validation phases:
 
 If you add a new config class that needs file existence checks or cross-section validation, add a `validate_yaml()` method and call it from the appropriate parent config's `validate_yaml()`.
 
+### OIDC authentication module
+
+Set `ols_config.authentication_config.module` to `oidc` to validate bearer JWTs
+against the configured OpenID Connect issuer. OIDC mode requires both
+`oidc_issuer_url` and `oidc_audience`; the issuer's discovery document and JWKS
+are cached for `oidc_jwks_cache_seconds` (default `300`). Tokens must use an
+RS256 key published by the issuer and contain valid `iss`, `aud`, `exp`, `iat`,
+and `sub` claims. The username comes from `oidc_username_claim` (default
+`preferred_username`) and falls back to `sub`. OLS derives a stable UUID user
+ID from the issuer and subject. To forward that token to an MCP server,
+configure its `Authorization` header as `kubernetes`. The issuer and discovered JWKS URL must use HTTPS. OIDC always verifies system
+TLS certificates and does not use the Kubernetes `skip_tls_verification`
+setting. Configure the issuer as its exact OIDC identifier; its trailing
+slash/path must match both discovery metadata and the
+token's `iss` claim.
+
+OIDC metrics access is denied unless both `oidc_metrics_access_claim` and
+`oidc_metrics_access_value` are configured. The configured string must match
+the claim's scalar string or one of its string-list values. This policy applies
+only to the metrics permission scope and does not change ordinary REST access.
+
+```yaml
+ols_config:
+  authentication_config:
+    module: oidc
+    oidc_issuer_url: "https://identity.example.com/realms/ols"
+    oidc_audience: "openshift-lightspeed"
+    oidc_username_claim: preferred_username
+    oidc_jwks_cache_seconds: 300
+    # Optional. Without both fields, OIDC callers cannot access Prometheus metrics.
+    oidc_metrics_access_claim: groups
+    oidc_metrics_access_value: metrics-readers
+```
+
 ### Optional Solr hybrid RAG (`ols_config.solr_hybrid`)
 
 Omit the key to leave Solr hybrid RAG off (no client, no tool). When present, values map to `SolrHybridSettings` and the feature is active. `solr_http_base` must be a valid `http` or `https` URL with a host (checked in `validate_yaml()`).

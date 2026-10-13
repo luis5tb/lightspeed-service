@@ -1,12 +1,14 @@
 """Integration tests for basic OLS REST API endpoints with no-op auth."""
 
+import pytest
 from fastapi import Request
 
 from ols import config, constants
 from ols.src.auth.auth import get_auth_dependency
 
 
-def test_authorized():
+@pytest.mark.asyncio
+async def test_authorized():
     """Check authorization based on no-op module."""
     config.reload_from_yaml_file("tests/config/config_for_integration_tests.yaml")
     config.ols_config.authentication_config.module = "noop"
@@ -15,7 +17,7 @@ def test_authorized():
 
     # auth is disabled
     request = Request(scope={"type": "http", "headers": [], "query_string": ""})
-    response = authorized.is_user_authorized(request)
+    response = await authorized.is_user_authorized(request)
     assert response is not None
     assert response.user_id == constants.DEFAULT_USER_UID
     assert response.username == constants.DEFAULT_USER_NAME
@@ -27,7 +29,7 @@ def test_authorized():
 
     # auth is enabled
     request = Request(scope={"type": "http", "headers": [], "query_string": ""})
-    response = authorized.is_user_authorized(request)
+    response = await authorized.is_user_authorized(request)
     assert response is not None
     assert response.user_id == constants.DEFAULT_USER_UID
     assert response.username == constants.DEFAULT_USER_NAME
@@ -42,7 +44,7 @@ def test_authorized():
         }
     )
 
-    response = authorized.is_user_authorized(request)
+    response = await authorized.is_user_authorized(request)
     assert response is not None
     assert response.user_id == user_id_in_request
     assert response.username == constants.DEFAULT_USER_NAME

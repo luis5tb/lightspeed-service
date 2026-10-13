@@ -1,6 +1,6 @@
 # Authentication -- Architecture
 
-The auth system uses a strategy pattern to inject authentication/authorization logic into FastAPI endpoints. A factory selects one of three implementations based on configuration, and the selected strategy is bound at module import time via FastAPI's `Depends()`.
+The auth system uses a strategy pattern to inject authentication/authorization logic into FastAPI endpoints. A factory selects one of four implementations based on configuration, and the selected strategy is bound at module import time via FastAPI's `Depends()`.
 
 ## Module Map
 
@@ -9,6 +9,7 @@ The auth system uses a strategy pattern to inject authentication/authorization l
 | `src/auth/auth.py` | `get_auth_dependency()`, `use_k8s_auth()` | Factory: selects auth implementation by config module name |
 | `src/auth/auth_dependency_interface.py` | `AuthDependencyInterface` (ABC) | Contract: `async __call__(request) -> (uid, username, skip_check, token)` |
 | `src/auth/k8s.py` | `K8sClientSingleton`, `AuthDependency`, `get_user_info()` | Production auth: Kubernetes TokenReview + SubjectAccessReview |
+| `src/auth/oidc.py` | `OIDCTokenValidator`, `AuthDependency` | OIDC issuer discovery, JWKS JWT validation, metrics claim policy |
 | `src/auth/noop.py` | `AuthDependency` | Dev auth: returns defaults, no validation |
 | `src/auth/noop_with_token.py` | `AuthDependency` | Test auth: extracts bearer token without validating it |
 
@@ -17,10 +18,11 @@ The auth system uses a strategy pattern to inject authentication/authorization l
 ### Factory resolution (startup)
 
 ```text
-olsconfig.yaml: authentication_config.module = "k8s" | "noop" | "noop-with-token"
+olsconfig.yaml: authentication_config.module = "k8s" | "oidc" | "noop" | "noop-with-token"
   -> get_auth_dependency(ols_config, virtual_path="/ols-access")
        match module:
          "k8s"             -> k8s.AuthDependency(virtual_path)
+         "oidc"            -> oidc.AuthDependency(authentication_config, virtual_path)
          "noop"            -> noop.AuthDependency(virtual_path)
          "noop-with-token" -> noop_with_token.AuthDependency(virtual_path)
 ```

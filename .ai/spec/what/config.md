@@ -150,14 +150,14 @@ Each provider entry under `llm_providers` supports:
 8. Credentials must never be stored as plaintext values in the YAML. They must always be file path references resolved at load time.
 9. TLS cannot be enabled without both a certificate path and a key path configured.
 10. The TLS security profile must enforce a minimum of TLS 1.2. The `OldType` profile is rejected.
-11. MCP servers using the `kubernetes` authorization header placeholder require the authentication module to be `k8s` or `noop-with-token`. With any other auth module, the server is excluded (not a fatal error -- it is silently filtered out with a warning).
+11. MCP servers using the `kubernetes` authorization header placeholder require a token-providing authentication module: `k8s`, `oidc`, or `noop-with-token`. With any other auth module, the server is excluded (not a fatal error -- it is filtered out with a warning). For OIDC, the placeholder carries the validated bearer token.
 
 ### Cross-Validation Constraints
 
 12. `default_provider` must name a provider that exists in `llm_providers`.
 13. `default_model` must name a model that exists within the default provider's model list.
 14. `conversation_cache.type` must be either `memory` or `postgres`. The corresponding sub-section (`memory` or `postgres`) must be present when the type is specified.
-15. `authentication_config.module` must be one of: `k8s`, `noop`, `noop-with-token`.
+15. `authentication_config.module` must be one of: `k8s`, `oidc`, `noop`, `noop-with-token`.
 16. Provider `type` must be one of the supported provider types: openai, azure_openai, watsonx, rhoai_vllm, rhelai_vllm, google_vertex, google_vertex_anthropic, anthropic, bedrock, fake_provider.
 17. `project_id` is required when provider type is `watsonx`.
 
