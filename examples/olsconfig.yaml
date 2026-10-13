@@ -158,11 +158,13 @@ mcp_servers:
   - name: openshift
     url: http://localhost:8080
     headers:
-      Authorization: kubernetes  # Uses the caller's k8s/OIDC token
+      Authorization: kubernetes  # Uses the caller's k8s/OIDC token (or exchanged A2A token)
     # timeout: 30  # Optional timeout in seconds
 
 # A2A (Agent2Agent) server surface. Disabled by default. When enabled, set
 # A2A_CLUSTER_ID and A2A_RPC_URL; the selected k8s or oidc auth module is used.
-# A2A_ENABLED=true/false overrides this flag.
+# A2A_ENABLED=true/false overrides the enablement flag. Token exchange needs
+# A2A_KEYCLOAK_ISSUER_URL and SPIFFE Workload API configuration when enabled.
 # a2a:
 #   enabled: false
+#   token_exchange_enabled: false

@@ -87,7 +87,7 @@ def resolve_header_value(
         value: Header value (may be a placeholder or actual value)
         header_name: Name of the header
         server_name: Name of the MCP server (for logging)
-        user_token: Validated caller token, if available.
+        user_token: Validated caller token (or exchanged A2A token), if available.
         client_headers: Client-provided headers (if available)
 
     Returns:
@@ -137,7 +137,7 @@ def resolve_server_headers(
 
     Args:
         server: MCP server configuration
-        user_token: Validated caller token, if available.
+        user_token: Validated caller token (or exchanged A2A token), if available.
         client_headers: Client-provided headers (if available)
 
     Returns:

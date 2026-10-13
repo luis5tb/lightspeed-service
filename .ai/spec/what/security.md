@@ -66,7 +66,7 @@ The service must protect customer data, enforce transport-layer encryption, reda
 
 ### MCP credential handling
 
-35. MCP server authorization headers support three resolution modes: (a) a file path, whose contents are read at config load time; (b) the `kubernetes` placeholder, which is replaced at request time with `Bearer <token>` from the authenticated request; (c) the `client` placeholder, which is replaced at request time with a header value supplied by the calling client.
+35. MCP server authorization headers support three resolution modes: (a) a file path, whose contents are read at config load time; (b) the `kubernetes` placeholder, which is replaced at request time with `Bearer <token>` from the authenticated request (or the exchanged A2A token); (c) the `client` placeholder, which is replaced at request time with a header value supplied by the calling client.
 36. The `kubernetes` placeholder must only be permitted when the authentication module is `k8s`, `oidc`, or `noop-with-token`. If used with any other authentication module, the MCP server must be excluded at config validation time.
 37. MCP connections must use the aggregated certificate store when a certificate directory is configured, ensuring custom CA certificates apply to MCP server communication.
 38. [PLANNED: OLS-2717] MCP servers (including openshift-mcp-server) must support TLS-encrypted connections.

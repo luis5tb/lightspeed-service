@@ -20,8 +20,10 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, AsyncGenerator, Optional
+from unittest.mock import AsyncMock, Mock
 
 import jwt
 import pytest
@@ -66,11 +68,13 @@ from ols.app.models.models import (  # noqa:E402
 from ols.constants import QueryMode  # noqa:E402
 from tests.unit.app.endpoints.test_a2a_auth import (  # noqa:E402  # reuse the same fakes/fixtures
     CLUSTER_ID,
+    ISSUER,
     make_settings,
     make_token,
     patch_oidc_provider,
 )
 
+EXCHANGED_CREDENTIAL = "exchange-token"
 
 
 @pytest.fixture(scope="module")
@@ -332,6 +336,9 @@ class TestSendMessage:
         captured = _stub_generate_response(
             monkeypatch, "the pod is crashlooping because of an OOM kill"
         )
+        exchange = AsyncMock(side_effect=AssertionError("exchange is disabled"))
+        monkeypatch.setattr(a2a_auth.get_authenticator(), "exchange_for_mcp", exchange)
+
         token_a = make_token(rsa_keypair)
         body = send_message_body()
         body["params"]["message"]["contextId"] = "external-context-id"
@@ -348,6 +355,7 @@ class TestSendMessage:
         )
 
         assert captured["user_token"] == token_a
+        exchange.assert_not_awaited()
         assert captured["mode"] == QueryMode.ASK
         assert captured["conversation_id"] != "external-context-id"
         uuid.UUID(captured["conversation_id"])
@@ -355,6 +363,102 @@ class TestSendMessage:
         # And no client-supplied MCP header override is ever forwarded --
         # metadata is consumed only for the OLS mode selector.
         assert captured["client_headers"] is None
+
+    def test_enabled_exchange_supplies_exchanged_token_to_mcp(
+        self, rsa_keypair, client, monkeypatch
+    ):
+        """Use the exchanged credential downstream when token exchange is enabled."""
+        captured = _stub_generate_response(monkeypatch, "investigation answer")
+        authenticator = a2a_auth.A2AAuthenticator(
+            make_settings(
+                token_exchange_enabled=True,
+                keycloak_issuer_url=ISSUER,
+                spiffe_jwt_audience=ISSUER,
+            )
+        )
+        exchange = AsyncMock(return_value=EXCHANGED_CREDENTIAL)
+        monkeypatch.setattr(authenticator, "exchange_for_mcp", exchange)
+        monkeypatch.setattr(a2a_auth, "_authenticator", authenticator)
+        token_a = make_token(rsa_keypair)
+
+        response = client.post(
+            "/a2a", json=send_message_body(), headers=auth_headers(token_a)
+        )
+
+        assert response.status_code == 200
+        assert captured["user_token"] == EXCHANGED_CREDENTIAL
+        exchange.assert_awaited_once()
+        assert exchange.await_args.args[0].token == token_a
+
+    def test_exchange_failure_fails_task_without_exposing_credentials(
+        self, rsa_keypair, client, monkeypatch, caplog
+    ):
+        """Audit and fail a task safely when the configured CA bundle is invalid."""
+        captured = _stub_generate_response(monkeypatch, "unused")
+        authenticator = a2a_auth.A2AAuthenticator(
+            make_settings(
+                token_exchange_enabled=True,
+                keycloak_issuer_url=ISSUER,
+                spiffe_jwt_audience=ISSUER,
+                keycloak_ca_bundle="missing-ca.pem",
+            )
+        )
+        monkeypatch.setattr(
+            authenticator._workload, "fetch", AsyncMock(return_value="jwt-svid")
+        )
+
+        class _InvalidCAContext:
+            def load_verify_locations(self, *, cafile: str) -> None:
+                raise OSError(f"invalid CA bundle: {cafile}")
+
+        monkeypatch.setattr(
+            a2a_auth.ssl, "create_default_context", lambda: _InvalidCAContext()
+        )
+        monkeypatch.setattr(a2a_auth, "_authenticator", authenticator)
+        audit_ctx = Mock()
+        audit_ctx.capture_content = False
+        audit_ctx.span.return_value = nullcontext()
+        process_request = a2a_executor.process_request
+
+        def process_request_with_audit_context(*args: Any) -> Any:
+            processed_request = process_request(*args)
+            processed_request.audit_ctx = audit_ctx
+            return processed_request
+
+        monkeypatch.setattr(
+            a2a_executor, "process_request", process_request_with_audit_context
+        )
+        token_a = make_token(rsa_keypair)
+        caplog.set_level("INFO")
+
+        response = client.post(
+            "/a2a", json=send_message_body(), headers=auth_headers(token_a)
+        )
+
+        assert response.status_code == 200
+        task = response.json()["result"]["task"]
+        assert task["status"]["state"] == "TASK_STATE_FAILED"
+        failure = task["status"]["message"]["parts"][0]["text"]
+        assert "OpenShift MCP" in failure
+        assert token_a not in failure
+        assert captured == {}
+        audit_ctx.span.assert_called_once_with("request.lifecycle")
+        audit_ctx.logger.request_started.assert_called_once()
+        assert (
+            audit_ctx.logger.request_started.call_args.kwargs["capture_content"]
+            is False
+        )
+        audit_ctx.logger.request_failed.assert_called_once_with(
+            error="mcp_token_exchange_failed"
+        )
+        audit_records = [record.getMessage() for record in caplog.records]
+        assert any(
+            "a2a_audit" in message
+            and 'action="exchange MCP credentials"' in message
+            and "outcome=error" in message
+            for message in audit_records
+        )
+        assert all(token_a not in message for message in audit_records)
 
     def test_default_mode_is_ask(self, rsa_keypair, client, monkeypatch):
         """Test default mode is ask behavior."""
@@ -1405,5 +1509,27 @@ class TestMisconfiguration:
                 "Authorization": "Bearer unused",
             },
         )
+        assert response.status_code == 503
+        assert response.json()["detail"] == "A2A is not configured"
+
+    def test_invalid_exchange_timeout_returns_503(self, client, monkeypatch):
+        """Return a configuration error response for malformed exchange settings."""
+        monkeypatch.setattr(a2a_auth, "_authenticator", None)
+        monkeypatch.setattr(config.a2a, "token_exchange_enabled", True)
+        monkeypatch.setenv("A2A_CLUSTER_ID", CLUSTER_ID)
+        monkeypatch.setenv("A2A_RPC_URL", "https://praxis.example.com/a2a")
+        monkeypatch.setenv("A2A_KEYCLOAK_ISSUER_URL", ISSUER)
+        monkeypatch.setenv("A2A_TOKEN_EXCHANGE_TIMEOUT_SECONDS", "not-a-timeout")
+
+        response = client.post(
+            "/a2a",
+            json=send_message_body(),
+            headers={
+                a2a_auth.CLUSTER_HEADER_NAME: CLUSTER_ID,
+                "A2A-Version": PROTOCOL_VERSION_1_0,
+                "Authorization": "Bearer unused",
+            },
+        )
+
         assert response.status_code == 503
         assert response.json()["detail"] == "A2A is not configured"

@@ -42,6 +42,7 @@ from fastapi import HTTPException
 from starlette.concurrency import run_in_threadpool
 
 from ols.app.endpoints import a2a_auth
+from ols.app.endpoints.a2a_auth import A2AExchangeError, A2AWorkloadIdentityError
 from ols.app.endpoints.ols import generate_response, process_request
 from ols.app.endpoints.streaming_ols import response_processing_wrapper
 from ols.app.models.models import (
@@ -237,6 +238,7 @@ class OLSAgentExecutor(AgentExecutor):
                     context_id=context.context_id,
                     action=action,
                     outcome=outcome,
+                    actor=a2a_auth.get_authenticator().audit_actor,
                 ),
             )
 
@@ -290,6 +292,50 @@ class OLSAgentExecutor(AgentExecutor):
         _remember_conversation_id(
             caller.task_scope, context.context_id, processed_request.conversation_id
         )
+
+        authenticator = a2a_auth.get_authenticator()
+        if authenticator.settings.token_exchange_enabled:
+            try:
+                processed_request.user_token = await authenticator.exchange_for_mcp(
+                    caller
+                )
+            except (A2AWorkloadIdentityError, A2AExchangeError) as error:
+                logger.error(
+                    "A2A token exchange failed for cluster %s: %s",
+                    caller.cluster_id,
+                    error,
+                )
+                if processed_request.audit_ctx:
+                    audit_ctx = processed_request.audit_ctx
+                    with audit_ctx.span("request.lifecycle"):
+                        audit_ctx.logger.request_started(
+                            mode=llm_request.mode,
+                            query=llm_request.query,
+                            attachments=[
+                                attachment.model_dump()
+                                for attachment in processed_request.attachments
+                            ],
+                            provider=llm_request.provider,
+                            model=llm_request.model,
+                            capture_content=audit_ctx.capture_content,
+                        )
+                        audit_ctx.logger.request_failed(
+                            error="mcp_token_exchange_failed"
+                        )
+                _audit("error", action="exchange MCP credentials")
+                await updater.failed(
+                    updater.new_agent_message(
+                        [
+                            Part(
+                                text=(
+                                    "Unable to obtain credentials for the OpenShift "
+                                    "MCP server"
+                                )
+                            )
+                        ]
+                    )
+                )
+                return
 
         await updater.start_work()
 

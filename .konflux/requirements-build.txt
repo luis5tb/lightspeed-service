@@ -17,10 +17,15 @@ flit-core==4.1.0
     #   packaging
     #   pathspec
     #   pyproject-metadata
+    #   wheel
 hatch-fancy-pypi-readme==25.1.0
-    # via anthropic
+    # via
+    #   anthropic
+    #   pem
 hatch-vcs==0.5.0
-    # via culsans
+    # via
+    #   culsans
+    #   pem
 hatchling==1.26.3
     # via
     #   anthropic
@@ -36,6 +41,7 @@ hatchling==1.32.4
     #   langchain-aws
     #   langchain-core
     #   langchain-google-vertexai
+    #   pem
     #   uv-dynamic-versioning
 meson-python==0.22.1
     # via numpy
@@ -77,5 +83,7 @@ vcs-versioning==2.6.0
     # via setuptools-scm
 versioneer==0.29
     # via bottleneck
+wheel==0.48.0
+    # via spiffe
 
 # The following packages are considered to be unsafe in a requirements file:

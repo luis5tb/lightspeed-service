@@ -8,7 +8,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import jwt
@@ -30,6 +30,9 @@ CLUSTER_ID = "api-bm-cluster-e2e-bos-redhat-com-6443"
 KID = "test-kid-1"
 K8S_TEST_BEARER = "k8s-token"
 AUDIT_TEST_BEARER = "secret-caller-token"
+EXCHANGE_CALLER_BEARER = "caller-token"
+EXCHANGE_ASSERTION = "jwt-svid"
+EXCHANGE_RESULT = "exchange-token"
 
 
 @pytest.fixture(scope="module")
@@ -491,6 +494,359 @@ class TestA2AAuthenticator:
         with pytest.raises(a2a_auth.A2AConfigurationError, match="A2A_CLUSTER_ID"):
             a2a_auth.A2ASettings.from_env()
 
+    def test_exchange_settings_are_optional_when_exchange_is_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Load A2A with no SPIFFE or Keycloak exchange settings by default."""
+        monkeypatch.setattr(config.a2a, "token_exchange_enabled", False)
+        monkeypatch.setenv("A2A_CLUSTER_ID", CLUSTER_ID)
+        monkeypatch.setenv("A2A_RPC_URL", "https://praxis.example.com/a2a")
+        monkeypatch.delenv("A2A_KEYCLOAK_ISSUER_URL", raising=False)
+        monkeypatch.setenv("A2A_SPIFFE_TIMEOUT_SECONDS", "not-a-timeout")
+
+        settings = a2a_auth.A2ASettings.from_env()
+
+        assert settings.token_exchange_enabled is False
+        assert settings.keycloak_issuer_url == ""
+
+    def test_exchange_requires_keycloak_issuer_when_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Require the Keycloak issuer only when the exchange feature is enabled."""
+        monkeypatch.setattr(config.a2a, "token_exchange_enabled", True)
+        monkeypatch.setenv("A2A_CLUSTER_ID", CLUSTER_ID)
+        monkeypatch.setenv("A2A_RPC_URL", "https://praxis.example.com/a2a")
+        monkeypatch.delenv("A2A_KEYCLOAK_ISSUER_URL", raising=False)
+
+        with pytest.raises(a2a_auth.A2AConfigurationError, match="when token exchange"):
+            a2a_auth.A2ASettings.from_env()
+
+    def test_exchange_rejects_http_keycloak_issuer_before_discovery(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reject insecure Keycloak issuer configuration before exchange requests."""
+        monkeypatch.setattr(config.a2a, "token_exchange_enabled", True)
+        monkeypatch.setenv("A2A_CLUSTER_ID", CLUSTER_ID)
+        monkeypatch.setenv("A2A_RPC_URL", "https://praxis.example.com/a2a")
+        monkeypatch.setenv("A2A_KEYCLOAK_ISSUER_URL", "http://keycloak.example/realm")
+
+        with pytest.raises(a2a_auth.A2AConfigurationError, match="must use HTTPS"):
+            a2a_auth.A2ASettings.from_env()
+
+    def test_exchange_preserves_keycloak_issuer_identifier(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Do not normalize a trailing slash from the configured OIDC issuer."""
+        monkeypatch.setattr(config.a2a, "token_exchange_enabled", True)
+        monkeypatch.setenv("A2A_CLUSTER_ID", CLUSTER_ID)
+        monkeypatch.setenv("A2A_RPC_URL", "https://praxis.example.com/a2a")
+        monkeypatch.setenv("A2A_KEYCLOAK_ISSUER_URL", f"{ISSUER}/")
+
+        settings = a2a_auth.A2ASettings.from_env()
+
+        assert settings.keycloak_issuer_url == f"{ISSUER}/"
+
+    def test_keycloak_exchanger_rejects_http_issuer_before_client_creation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reject an HTTP issuer before creating a client that could send credentials."""
+
+        def fail_if_client_created(**_: Any) -> Any:
+            pytest.fail("HTTP client must not be created for an HTTP issuer")
+
+        monkeypatch.setattr(a2a_auth.httpx, "AsyncClient", fail_if_client_created)
+
+        with pytest.raises(a2a_auth.A2AConfigurationError, match="must use HTTPS"):
+            a2a_auth.KeycloakTokenExchanger(
+                make_settings(keycloak_issuer_url="http://keycloak.example/realm")
+            )
+
+    def test_keycloak_exchanger_rejects_http_issuer_before_http_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reject an insecure configured issuer before opening a client or posting tokens."""
+        client_created = False
+
+        def fail_if_client_created(**_: Any) -> Any:
+            nonlocal client_created
+            client_created = True
+            raise AssertionError("HTTP client must not be created")
+
+        monkeypatch.setattr(a2a_auth.httpx, "AsyncClient", fail_if_client_created)
+
+        with pytest.raises(a2a_auth.A2AConfigurationError, match="must use HTTPS"):
+            a2a_auth.KeycloakTokenExchanger(
+                make_settings(keycloak_issuer_url="http://keycloak.example/realm")
+            )
+
+        assert client_created is False
+
+    @pytest.mark.parametrize(
+        ("setting_name", "setting_value"),
+        [
+            ("A2A_SPIFFE_TIMEOUT_SECONDS", "not-a-timeout"),
+            ("A2A_SPIFFE_TIMEOUT_SECONDS", "301"),
+            ("A2A_KEYCLOAK_TIMEOUT_SECONDS", "0"),
+            ("A2A_TOKEN_EXCHANGE_TIMEOUT_SECONDS", "inf"),
+            ("A2A_KEYCLOAK_DISCOVERY_CACHE_SECONDS", "invalid"),
+            ("A2A_KEYCLOAK_DISCOVERY_CACHE_SECONDS", "86401"),
+        ],
+    )
+    def test_exchange_rejects_invalid_numeric_settings(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        setting_name: str,
+        setting_value: str,
+    ) -> None:
+        """Reject malformed, nonpositive, or out-of-range exchange settings."""
+        monkeypatch.setattr(config.a2a, "token_exchange_enabled", True)
+        monkeypatch.setenv("A2A_CLUSTER_ID", CLUSTER_ID)
+        monkeypatch.setenv("A2A_RPC_URL", "https://praxis.example.com/a2a")
+        monkeypatch.setenv("A2A_KEYCLOAK_ISSUER_URL", ISSUER)
+        monkeypatch.setenv(setting_name, setting_value)
+
+        with pytest.raises(a2a_auth.A2AConfigurationError, match=setting_name):
+            a2a_auth.A2ASettings.from_env()
+
+    @pytest.mark.asyncio
+    async def test_exchange_disabled_returns_caller_token_without_fetching_svid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pass the caller token through and do not request workload identity by default."""
+        config.ols_config.authentication_config = AuthenticationConfig(module="k8s")
+        authenticator = a2a_auth.A2AAuthenticator(make_settings())
+        fetch = AsyncMock(side_effect=AssertionError("SPIFFE is disabled"))
+        monkeypatch.setattr(a2a_auth.SpiffeWorkloadIdentity, "fetch", fetch)
+        caller = a2a_auth.CallerIdentity(
+            sub="user-1",
+            claims={},
+            cluster_id=CLUSTER_ID,
+            token=EXCHANGE_CALLER_BEARER,
+            request_id="request-1",
+        )
+
+        result = await authenticator.exchange_for_mcp(caller)
+
+        assert result == EXCHANGE_CALLER_BEARER
+        fetch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_exchange_enabled_uses_svid_and_caller_subject_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exchange the caller token with a fresh workload identity assertion."""
+        config.ols_config.authentication_config = AuthenticationConfig(module="k8s")
+        settings = make_settings(
+            token_exchange_enabled=True,
+            keycloak_issuer_url=ISSUER,
+            spiffe_jwt_audience=ISSUER,
+        )
+        authenticator = a2a_auth.A2AAuthenticator(settings)
+        fetch = AsyncMock(return_value=EXCHANGE_ASSERTION)
+        exchange = AsyncMock(return_value="exchanged-token")
+        monkeypatch.setattr(authenticator._workload, "fetch", fetch)
+        monkeypatch.setattr(authenticator._exchanger, "exchange", exchange)
+        caller = a2a_auth.CallerIdentity(
+            sub="user-1",
+            claims={},
+            cluster_id=CLUSTER_ID,
+            token=EXCHANGE_CALLER_BEARER,
+            request_id="request-1",
+        )
+
+        result = await authenticator.exchange_for_mcp(caller)
+
+        assert result == "exchanged-token"
+        fetch.assert_awaited_once()
+        exchange.assert_awaited_once_with(
+            subject_token=EXCHANGE_CALLER_BEARER,
+            client_assertion=EXCHANGE_ASSERTION,
+        )
+
+
+@pytest.mark.asyncio
+async def test_keycloak_exchange_requests_mcp_token_without_client_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Send the RFC 8693 request and use its returned access token."""
+    calls: list[tuple[str, Optional[dict[str, Any]]]] = []
+    client_settings: dict[str, Any] = {}
+
+    class _FakeExchangeClient:
+        async def __aenter__(self) -> _FakeExchangeClient:
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+        async def get(self, url: str, **_: Any) -> _FakeResponse:
+            calls.append((url, None))
+            return _FakeResponse(
+                {"issuer": ISSUER, "token_endpoint": f"{ISSUER}/token"}
+            )
+
+        async def post(
+            self, url: str, data: Optional[dict[str, Any]] = None
+        ) -> _FakeResponse:
+            calls.append((url, data))
+            return _FakeResponse({"access_token": "exchange-token"})
+
+    def make_exchange_client(**kwargs: Any) -> _FakeExchangeClient:
+        client_settings.update(kwargs)
+        return _FakeExchangeClient()
+
+    monkeypatch.setattr(a2a_auth.httpx, "AsyncClient", make_exchange_client)
+    exchanger = a2a_auth.KeycloakTokenExchanger(
+        make_settings(keycloak_issuer_url=ISSUER)
+    )
+
+    token = await exchanger.exchange(EXCHANGE_CALLER_BEARER, EXCHANGE_ASSERTION)
+
+    assert token == EXCHANGE_RESULT
+    assert client_settings["follow_redirects"] is False
+    assert calls[0][0] == f"{ISSUER}/.well-known/openid-configuration"
+    endpoint, payload = calls[1]
+    assert endpoint == f"{ISSUER}/token"
+    assert payload is not None
+    assert payload["subject_token"] == EXCHANGE_CALLER_BEARER
+    assert payload["client_assertion"] == EXCHANGE_ASSERTION
+    assert "client_id" not in payload
+
+
+@pytest.mark.asyncio
+async def test_keycloak_exchange_rejects_non_string_access_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed when Keycloak returns a malformed access_token value."""
+
+    class _FakeExchangeClient:
+        async def __aenter__(self) -> _FakeExchangeClient:
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+        async def get(self, _url: str, **_: Any) -> _FakeResponse:
+            return _FakeResponse(
+                {"issuer": ISSUER, "token_endpoint": f"{ISSUER}/token"}
+            )
+
+        async def post(
+            self, _url: str, data: Optional[dict[str, Any]] = None
+        ) -> _FakeResponse:
+            return _FakeResponse({"access_token": {"unexpected": "object"}})
+
+    monkeypatch.setattr(
+        a2a_auth.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _FakeExchangeClient(),
+    )
+    exchanger = a2a_auth.KeycloakTokenExchanger(
+        make_settings(keycloak_issuer_url=ISSUER)
+    )
+
+    with pytest.raises(a2a_auth.A2AExchangeError, match="no access token"):
+        await exchanger.exchange(EXCHANGE_CALLER_BEARER, EXCHANGE_ASSERTION)
+
+
+@pytest.mark.asyncio
+async def test_keycloak_exchange_rejects_http_token_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject an insecure discovery token endpoint before posting credentials."""
+    posted: list[str] = []
+
+    class _FakeExchangeClient:
+        async def __aenter__(self) -> _FakeExchangeClient:
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+        async def get(self, _url: str, **_: Any) -> _FakeResponse:
+            return _FakeResponse(
+                {"issuer": ISSUER, "token_endpoint": "http://issuer.example/token"}
+            )
+
+        async def post(
+            self, url: str, data: Optional[dict[str, Any]] = None
+        ) -> _FakeResponse:
+            posted.append(url)
+            return _FakeResponse({"access_token": "unexpected"})
+
+    monkeypatch.setattr(
+        a2a_auth.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _FakeExchangeClient(),
+    )
+    exchanger = a2a_auth.KeycloakTokenExchanger(
+        make_settings(keycloak_issuer_url=ISSUER)
+    )
+
+    with pytest.raises(a2a_auth.A2AExchangeError, match="must use HTTPS"):
+        await exchanger.exchange(EXCHANGE_CALLER_BEARER, EXCHANGE_ASSERTION)
+
+    assert posted == []
+
+
+@pytest.mark.asyncio
+async def test_keycloak_exchange_requires_exact_discovery_issuer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject issuer metadata that differs even by a trailing slash."""
+    posted: list[str] = []
+
+    class _FakeExchangeClient:
+        async def __aenter__(self) -> _FakeExchangeClient:
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+        async def get(self, _url: str, **_: Any) -> _FakeResponse:
+            return _FakeResponse(
+                {"issuer": f"{ISSUER}/", "token_endpoint": f"{ISSUER}/token"}
+            )
+
+        async def post(
+            self, url: str, data: Optional[dict[str, Any]] = None
+        ) -> _FakeResponse:
+            posted.append(url)
+            return _FakeResponse({"access_token": EXCHANGE_RESULT})
+
+    monkeypatch.setattr(
+        a2a_auth.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _FakeExchangeClient(),
+    )
+    exchanger = a2a_auth.KeycloakTokenExchanger(
+        make_settings(keycloak_issuer_url=ISSUER)
+    )
+
+    with pytest.raises(a2a_auth.A2AExchangeError, match="issuer does not match"):
+        await exchanger.exchange(EXCHANGE_CALLER_BEARER, EXCHANGE_ASSERTION)
+
+    assert posted == []
+
+
+@pytest.mark.asyncio
+async def test_keycloak_exchange_wraps_invalid_ca_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Convert CA loading failures into a controlled exchange exception."""
+
+    class _InvalidCAContext:
+        def load_verify_locations(self, *, cafile: str) -> None:
+            raise OSError(f"invalid CA bundle: {cafile}")
+
+    monkeypatch.setattr(a2a_auth.ssl, "create_default_context", _InvalidCAContext)
+    exchanger = a2a_auth.KeycloakTokenExchanger(
+        make_settings(keycloak_issuer_url=ISSUER, keycloak_ca_bundle="missing-ca.pem")
+    )
+
+    with pytest.raises(a2a_auth.A2AExchangeError, match="TLS configuration is invalid"):
+        await exchanger.exchange(EXCHANGE_CALLER_BEARER, EXCHANGE_ASSERTION)
+
 
 def test_audit_record_does_not_include_caller_token() -> None:
     """Record identity and request context without recording bearer credentials."""
@@ -509,3 +865,21 @@ def test_audit_record_does_not_include_caller_token() -> None:
     assert "subject=user-1" in record
     assert "on_behalf_of=trusted-client" in record
     assert AUDIT_TEST_BEARER not in record
+
+
+def test_audit_record_escapes_newlines_in_request_id() -> None:
+    """Escape control characters so request ids cannot inject audit records."""
+    caller = a2a_auth.CallerIdentity(
+        sub="user-1",
+        claims={},
+        cluster_id=CLUSTER_ID,
+        token=AUDIT_TEST_BEARER,
+        request_id="request-1\noutcome=forged",
+    )
+
+    record = a2a_auth.audit_record(
+        caller, task_id="task-1", context_id="context-1", action="query", outcome="ok"
+    )
+
+    assert "\n" not in record
+    assert 'request_id="request-1\\noutcome=forged"' in record

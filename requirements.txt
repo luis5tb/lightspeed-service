@@ -250,6 +250,7 @@ cryptography==50.0.2 \
     #   msal
     #   ols
     #   pyjwt
+    #   spiffe
 culsans==0.11.0 \
     --hash=sha256:0b43d0d05dce6106293d114c86e3fb4bfc63088cfe8ff08ed3fe36891447fe33 \
     --hash=sha256:278d118f63fc75b9db11b664b436a1b83cc30d9577127848ba41420e66eb5a47
@@ -491,6 +492,7 @@ grpcio==1.84.0 \
     #   grpcio-status
     #   opentelemetry-exporter-otlp-proto-grpc
     #   qdrant-client
+    #   spiffe
 grpcio-status==1.84.0 \
     --hash=sha256:0c182ca0d6e60acbfd0e14499cf39a155e4827a1c3fd9f7638e49af15a74c30a \
     --hash=sha256:5caf28ba7184b81f618b5f7f094859fd2541bf429d2189bbbcd715c9c2cdcee2
@@ -1045,6 +1047,10 @@ pandas==2.3.3 \
     --hash=sha256:e05e1af93b977f7eafa636d043f9f94c7ee3ac81af99c13508215942e64c993b \
     --hash=sha256:ecaf1e12bdc03c86ad4a7ea848d66c685cb6851d807a26aa245ca3d2017a1908
     # via ibm-watsonx-ai
+pem==23.1.0 \
+    --hash=sha256:06503ff2441a111f853ce4e8b9eb9d5fedb488ebdbf560115d3dd53a1b4afc73 \
+    --hash=sha256:78bbb1e75b737891350cb9499cbba31da5d59545f360f44163c0bc751cad55d3
+    # via spiffe
 pillow==12.3.0 \
     --hash=sha256:0dd2064cbc55aaec028ef5fbb60fa47bb6c3e7918e07ff17935284b227a9d2df \
     --hash=sha256:331b624368d4f1d069149002f25f44bc61c8919ce8ddb3c45bdad8f6e2d89510 \
@@ -1124,6 +1130,7 @@ protobuf==6.33.6 \
     #   opentelemetry-proto
     #   proto-plus
     #   qdrant-client
+    #   spiffe
 psycopg2-binary==2.9.13 \
     --hash=sha256:0405dd4d97720e7ab177aa02e493f524907c4cb3c445ac173e2627948d3d0528 \
     --hash=sha256:0463c00f946517f3e69192a59e6601e023ff9de45ad0a875eda3d6b1bebeb7ce \
@@ -1151,11 +1158,15 @@ pyarrow==23.0.1 \
 pyasn1==0.6.4 \
     --hash=sha256:9c447d8431c947fe4c8febc4ed9e760bc29011a5b01e5c74b67025bd9fb8ce81 \
     --hash=sha256:deda9277cfd454080ec40b207fb6df82206a3a2688735233cdcd8d3d565f088b
-    # via pyasn1-modules
+    # via
+    #   pyasn1-modules
+    #   spiffe
 pyasn1-modules==0.4.2 \
     --hash=sha256:29253a9207ce32b64c3ac6600edc75368f98473906e8fd1043bd6b5b1de2c14a \
     --hash=sha256:677091de870a80aae844b1ca6134f54652fa2c8c5a52aa396440ac3106e941e6
-    # via google-auth
+    # via
+    #   google-auth
+    #   spiffe
 pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy' \
     --hash=sha256:600f49d217304a5902ac3c37e1281c9fe94e4d0489de643a9504c5cdfdfc6b29 \
     --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
@@ -1225,6 +1236,7 @@ pyjwt==2.15.1 \
     #   mcp
     #   msal
     #   ols
+    #   spiffe
 python-dateutil==2.9.0.post0 \
     --hash=sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3 \
     --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
@@ -1450,6 +1462,10 @@ sniffio==1.3.1 \
     #   google-genai
     #   langsmith
     #   openai
+spiffe==0.3.2 \
+    --hash=sha256:24137c1fbf70abe42165ccefadc00e3793f868cf44861357018c686862ccc8f0 \
+    --hash=sha256:949819e71869c86840c7740d6a9b0c616f0a19886899158da68dfdeb59bd0be1
+    # via ols
 sqlalchemy==2.1.1 \
     --hash=sha256:0220e0d1d1ad2391a03cd6713ca5d795419033cc40baa1233f9ad454dffa25e6 \
     --hash=sha256:054a2c2b6cbe3ca7cb88aba9c5e2ecdbfc43656bea22326a41d09e5398c86ec4 \

@@ -2888,6 +2888,7 @@ dependencies = [
     { name = "requests" },
     { name = "sentence-transformers" },
     { name = "setuptools" },
+    { name = "spiffe" },
     { name = "sqlalchemy" },
     { name = "starlette" },
     { name = "torch", version = "2.14.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
@@ -2993,6 +2994,7 @@ requires-dist = [
     { name = "scikit-learn", marker = "extra == 'evaluation'", specifier = ">=1.6.1" },
     { name = "sentence-transformers", specifier = ">=5.6.0" },
     { name = "setuptools", specifier = ">=72.1.0" },
+    { name = "spiffe", specifier = "==0.3.2" },
     { name = "sqlalchemy", specifier = ">=2.0.35" },
     { name = "starlette", specifier = ">=1.0.1" },
     { name = "torch", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cpu" },
@@ -3217,6 +3219,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/5a/82/42f767fc1c1143d6fd36efb827202a2d997a375e160a71eb2888a925aac1/pathspec-1.1.1.tar.gz", hash = "sha256:17db5ecd524104a120e173814c90367a96a98d07c45b2e10c2f3919fff91bf5a", size = 135180, upload-time = "2026-04-27T01:46:08.907Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f1/d9/7fb5aa316bc299258e68c73ba3bddbc499654a07f151cba08f6153988714/pathspec-1.1.1-py3-none-any.whl", hash = "sha256:a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189", size = 57328, upload-time = "2026-04-27T01:46:07.06Z" },
+]
+
+[[package]]
+name = "pem"
+version = "23.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/05/86/16c0b6789816f8d53f2f208b5a090c9197da8a6dae4d490554bb1bedbb09/pem-23.1.0.tar.gz", hash = "sha256:06503ff2441a111f853ce4e8b9eb9d5fedb488ebdbf560115d3dd53a1b4afc73", size = 43796, upload-time = "2023-06-21T10:24:40.539Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c9/97/8299a481ae6c08494b5d53511e6a4746775d8a354c685c69d8796b2ed482/pem-23.1.0-py3-none-any.whl", hash = "sha256:78bbb1e75b737891350cb9499cbba31da5d59545f360f44163c0bc751cad55d3", size = 9195, upload-time = "2023-06-21T10:24:39.164Z" },
 ]
 
 [[package]]
@@ -4333,6 +4344,24 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/43/f8/0a71edf031f03c40db17503cb8ca78a69a171254e568e7db241b0ab57ea1/snowballstemmer-3.1.1.tar.gz", hash = "sha256:e07bbc54a0d798fe6010a12398422e62a8bfbba95c394fd0956ef58cb4d3e260", size = 123314, upload-time = "2026-06-03T00:56:40.194Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4c/07/2ebca9b11fb9be7340a818d8d6f63feaebb146be2c4afbd6061701d6df6e/snowballstemmer-3.1.1-py3-none-any.whl", hash = "sha256:7e207fa178741da09cdee59d3ecec3827ad5f92b1fc5c9ff3755b639f71f5752", size = 104164, upload-time = "2026-06-03T00:56:38.614Z" },
+]
+
+[[package]]
+name = "spiffe"
+version = "0.3.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "grpcio" },
+    { name = "pem" },
+    { name = "protobuf" },
+    { name = "pyasn1" },
+    { name = "pyasn1-modules" },
+    { name = "pyjwt", extra = ["crypto"] },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/38/f9/ad650883b7794ab51e9c43922fada45d80fbcb70b790f8a3dfa89c5751ef/spiffe-0.3.2.tar.gz", hash = "sha256:949819e71869c86840c7740d6a9b0c616f0a19886899158da68dfdeb59bd0be1", size = 42053, upload-time = "2026-10-01T16:07:25.876Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8c/ce/fc633ce1bfd09aec8fa669f344e81b166fd5fea402b2d38de05625365ec3/spiffe-0.3.2-py3-none-any.whl", hash = "sha256:24137c1fbf70abe42165ccefadc00e3793f868cf44861357018c686862ccc8f0", size = 59575, upload-time = "2026-10-01T16:07:24.577Z" },
 ]
 
 [[package]]

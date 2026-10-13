@@ -1539,9 +1539,10 @@ class DevConfig(BaseModel):
 
 
 class A2AConfig(BaseModel):
-    """Configuration for the optional Agent2Agent server surface."""
+    """Configure the optional Agent2Agent server and caller-token exchange."""
 
     enabled: bool = False
+    token_exchange_enabled: bool = False
 
 
 class Config(BaseModel):

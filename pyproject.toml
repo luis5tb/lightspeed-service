@@ -104,6 +104,9 @@ dependencies = [
     "PyJWT[crypto]>=2.10.0,<3.0.0",
     # Real A2A JSON-RPC, agent-card, task, and streaming server implementation.
     "a2a-sdk[http-server,fastapi]==1.1.5",
+    # SPIFFE workload identity used only when A2A token exchange is enabled;
+    # 0.3.2 permits the fixed PyJWT 2.14+ range (0.3.1 capped it below 2.14).
+    "spiffe==0.3.2",
     "fastapi>=0.115.6",
     "langchain>=0.3.12",
     "langchain-ibm>=0.3.2",

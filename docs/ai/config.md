@@ -114,11 +114,13 @@ are cached for `oidc_jwks_cache_seconds` (default `300`). Tokens must use an
 RS256 key published by the issuer and contain valid `iss`, `aud`, `exp`, `iat`,
 and `sub` claims. The username comes from `oidc_username_claim` (default
 `preferred_username`) and falls back to `sub`. OLS derives a stable UUID user
-ID from the issuer and subject, and forwards the validated caller token to
-downstream MCP servers. The issuer and discovered JWKS URL must use HTTPS;
-OIDC always verifies system TLS certificates and does not use the Kubernetes
-`skip_tls_verification` setting. Configure the issuer as its exact OIDC
-identifier; its trailing slash/path must match both discovery metadata and the
+ID from the issuer and subject. To forward that token to an MCP server,
+configure its `Authorization` header as `kubernetes`; the same placeholder
+receives the exchanged token on A2A requests when token exchange is enabled.
+The issuer and discovered JWKS URL must use HTTPS. OIDC always verifies system
+TLS certificates and does not use the Kubernetes `skip_tls_verification`
+setting. Configure the issuer as its exact OIDC identifier; its trailing
+slash/path must match both discovery metadata and the
 token's `iss` claim.
 
 OIDC metrics access is denied unless both `oidc_metrics_access_claim` and
@@ -145,12 +147,28 @@ Top-level `a2a.enabled` (default `false`) gates mounting of the Agent2Agent
 surface. A2A uses the selected `k8s` or `oidc` authentication module; development
 authentication bypass and no-op modules are not accepted for A2A. `A2A_ENABLED`
 overrides the YAML flag when set. Set `A2A_CLUSTER_ID` and `A2A_RPC_URL` for
-cluster scoping and the public agent card. A2A task and context state is
+cluster scoping and the public agent card. Token exchange is disabled by
+default; set `a2a.token_exchange_enabled: true` to exchange the caller token for
+an MCP-scoped token using the workload's SPIFFE JWT-SVID. This requires
+an HTTPS `A2A_KEYCLOAK_ISSUER_URL` and the SPIFFE Workload API settings. The
+issuer URL must match Keycloak discovery metadata exactly, including a trailing
+slash if present. The `A2A_SPIFFE_TIMEOUT_SECONDS`,
+`A2A_KEYCLOAK_TIMEOUT_SECONDS`, and `A2A_TOKEN_EXCHANGE_TIMEOUT_SECONDS`
+values must be finite and in `(0, 300]`;
+`A2A_KEYCLOAK_DISCOVERY_CACHE_SECONDS` must be in `[1, 86400]`. Invalid values
+fail A2A configuration with HTTP 503. When exchange is disabled, OLS passes the
+validated caller token directly to the MCP path. A2A task and context state is
 process-local. At most 1,024 tasks may be in flight; excess new requests get
 JSON-RPC error `-32603` with `retryable: true` metadata. The latest 1,024
 terminal task results and 1,024 context bindings are retained separately.
 Older terminal tasks may return not found, and an evicted idle context starts
 a new OLS conversation. See `.ai/spec/what/a2a.md`.
+
+```yaml
+a2a:
+  enabled: true
+  token_exchange_enabled: false
+```
 
 ### Optional Solr hybrid RAG (`ols_config.solr_hybrid`)
 

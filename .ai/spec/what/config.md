@@ -57,7 +57,7 @@ The YAML file has five top-level sections:
 | `ols_config` | Yes | All service behavior configuration | (fields enumerated below) |
 | `mcp_servers` | No | MCP server definitions | see what/tools.md |
 | `dev_config` | No | Developer-mode flags | (fields enumerated below) |
-| `a2a` | No | A2A server enablement (`enabled`, default false); A2A uses the selected `k8s` or `oidc` authentication module | see what/a2a.md |
+| `a2a` | No | A2A server enablement (`enabled`, default false) and optional token exchange (`token_exchange_enabled`, default false); uses selected `k8s` or `oidc` authentication module | see what/a2a.md |
 
 ### `ols_config` Fields
 
@@ -151,7 +151,7 @@ Each provider entry under `llm_providers` supports:
 8. Credentials must never be stored as plaintext values in the YAML. They must always be file path references resolved at load time.
 9. TLS cannot be enabled without both a certificate path and a key path configured.
 10. The TLS security profile must enforce a minimum of TLS 1.2. The `OldType` profile is rejected.
-11. MCP servers using the `kubernetes` authorization header placeholder require a token-providing authentication module: `k8s`, `oidc`, or `noop-with-token`. With any other auth module, the server is excluded (not a fatal error -- it is filtered out with a warning). For OIDC, the placeholder carries the validated bearer token.
+11. MCP servers using the `kubernetes` authorization header placeholder require a token-providing authentication module: `k8s`, `oidc`, or `noop-with-token`. With any other auth module, the server is excluded (not a fatal error -- it is filtered out with a warning). For OIDC, the placeholder carries the validated bearer token; for A2A with exchange enabled, it carries the exchanged token.
 
 ### Cross-Validation Constraints
 

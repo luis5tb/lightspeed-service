@@ -2827,10 +2827,11 @@ def test_config():
                 "expire_llm_is_ready_persistent_state": 2,
             },
             "dev_config": {"disable_tls": "true"},
-            "a2a": {"enabled": True},
+            "a2a": {"enabled": True, "token_exchange_enabled": True},
         }
     )
     assert config.a2a.enabled is True
+    assert config.a2a.token_exchange_enabled is True
     assert len(config.llm_providers.providers) == 3
     assert (
         config.llm_providers.providers[
@@ -2895,6 +2896,7 @@ def test_config():
 def test_config_a2a_is_disabled_by_default():
     """Default to an unmounted A2A surface when no configuration is loaded."""
     assert Config().a2a.enabled is False
+    assert Config().a2a.token_exchange_enabled is False
 
 
 def test_config_equality():
