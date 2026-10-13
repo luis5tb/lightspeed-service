@@ -2,6 +2,8 @@
 
 Control which users can access the OpenShift LightSpeed service and what they are permitted to do, integrating with Kubernetes RBAC in production and providing bypass modes for development.
 
+The A2A protocol surface (when enabled) uses the selected `k8s` or `oidc` module and adds a required cluster scope. See `what/a2a.md`.
+
 ## Behavioral Rules
 
 1. The system must support the authentication modules: `k8s`, `oidc`, `noop`, and `noop-with-token`.

@@ -160,3 +160,9 @@ mcp_servers:
     headers:
       Authorization: kubernetes  # Uses the caller's k8s/OIDC token
     # timeout: 30  # Optional timeout in seconds
+
+# A2A (Agent2Agent) server surface. Disabled by default. When enabled, set
+# A2A_CLUSTER_ID and A2A_RPC_URL; the selected k8s or oidc auth module is used.
+# A2A_ENABLED=true/false overrides this flag.
+# a2a:
+#   enabled: false

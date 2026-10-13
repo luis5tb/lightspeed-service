@@ -3,6 +3,7 @@
 from fastapi import FastAPI
 
 from ols.app.endpoints import (
+    a2a,
     authorized,
     conversations,
     feedback,
@@ -32,3 +33,7 @@ def include_routers(app: FastAPI) -> None:
     app.include_router(health.router)
     app.include_router(metrics.router)
     app.include_router(authorized.router)
+    # A2A is a distinct protocol surface (see a2a.py). Mount only when
+    # explicitly enabled so ordinary OLS deployments stay free of A2A routes.
+    if a2a.is_a2a_enabled():
+        a2a.register_routes(app)

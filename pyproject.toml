@@ -102,6 +102,8 @@ dependencies = [
     "aiostream>=0.7.0",
     "httpx>=0.28.0",
     "PyJWT[crypto]>=2.10.0,<3.0.0",
+    # Real A2A JSON-RPC, agent-card, task, and streaming server implementation.
+    "a2a-sdk[http-server,fastapi]==1.1.5",
     "fastapi>=0.115.6",
     "langchain>=0.3.12",
     "langchain-ibm>=0.3.2",

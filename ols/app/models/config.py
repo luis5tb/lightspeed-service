@@ -1538,6 +1538,12 @@ class DevConfig(BaseModel):
     uvicorn_port_number: Optional[int] = None
 
 
+class A2AConfig(BaseModel):
+    """Configuration for the optional Agent2Agent server surface."""
+
+    enabled: bool = False
+
+
 class Config(BaseModel):
     """Global service configuration."""
 
@@ -1545,6 +1551,7 @@ class Config(BaseModel):
     ols_config: OLSConfig = OLSConfig()
     dev_config: DevConfig = DevConfig()
     mcp_servers: MCPServers = MCPServers()
+    a2a: A2AConfig = A2AConfig()
 
     def __init__(
         self,
@@ -1575,6 +1582,7 @@ class Config(BaseModel):
 
         # initialize MCP servers
         self.mcp_servers = MCPServers(servers=data.get("mcp_servers", []))
+        self.a2a = A2AConfig(**(data.get("a2a") or {}))
 
         # Validate MCP servers now that auth config is available
         self._validate_mcp_servers()

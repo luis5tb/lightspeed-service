@@ -26,6 +26,15 @@ WORKDIR /app-root
 # Step 1: Copy only dependency metadata (not source code).
 # LICENSE and README.md are needed by hatchling for metadata resolution.
 COPY pyproject.toml uv.lock .konflux/requirements.hashes.wheel.txt .konflux/requirements.hashes.source.txt .konflux/requirements.hashes.wheel.pypi.txt .konflux/requirements.hermetic.txt .konflux/rank_bm25_version.py LICENSE README.md ./
+# [tool.hatch.version] (pyproject.toml) reads this file as the package's
+# dynamic version. The non-hermetic `uv sync --no-install-project` branch
+# below still invokes hatchling's prepare_metadata_for_build_editable hook
+# to resolve it, despite --no-install-project, and fails with "file does not
+# exist: ols/version.py" without this -- only the hermetic branch (which
+# never calls `uv sync`, just `uv pip install --no-deps`) avoids needing it
+# this early. A static, rarely-changing file, so copying it ahead of the
+# rest of ols/ below doesn't meaningfully hurt layer caching.
+COPY ols/version.py ./ols/version.py
 
 # Step 2: Install dependencies only (cached unless pyproject.toml/uv.lock change).
 # In hermetic builds PIP_FIND_LINKS and PIP_NO_INDEX are injected by Konflux.
