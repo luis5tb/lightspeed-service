@@ -188,6 +188,7 @@ class TestAgentCard:
         response = client.get("/.well-known/agent-card.json")
         assert response.status_code == 200
         card = response.json()
+        assert card["url"] == "https://praxis.example.com/a2a"
         assert card["supportedInterfaces"][0]["url"] == "https://praxis.example.com/a2a"
         assert card["supportedInterfaces"][0]["protocolBinding"] == "JSONRPC"
         assert card["capabilities"]["streaming"] is True
