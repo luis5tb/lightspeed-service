@@ -212,6 +212,56 @@ class ProxyConfig(BaseModel):
         return values
 
 
+class OIDCIssuerConfig(BaseModel):
+    """Configuration for a single OIDC issuer."""
+
+    issuer_url: str
+    audience: str
+    username_claim: str = "preferred_username"
+    jwks_cache_seconds: PositiveInt = 300
+
+    @field_validator("issuer_url")
+    @classmethod
+    def validate_issuer_url(cls, v: str) -> str:
+        """Validate that issuer URL is a valid HTTPS URL."""
+        try:
+            issuer_url = urlsplit(v)
+            issuer_host = issuer_url.hostname
+            issuer_url.port  # Trigger ValueError if port is malformed
+        except ValueError as error:
+            raise checks.InvalidConfigurationError(
+                "issuer_url must be a valid HTTPS URL"
+            ) from error
+        if (
+            issuer_url.scheme != "https"
+            or not issuer_host
+            or issuer_url.username is not None
+            or issuer_url.password is not None
+            or issuer_url.query
+            or issuer_url.fragment
+        ):
+            raise checks.InvalidConfigurationError(
+                "issuer_url must be a valid HTTPS URL"
+            )
+        return v
+
+    @field_validator("audience")
+    @classmethod
+    def validate_audience(cls, v: str) -> str:
+        """Validate that audience is not empty."""
+        if not v or not v.strip():
+            raise checks.InvalidConfigurationError("audience must not be empty")
+        return v
+
+    @field_validator("username_claim")
+    @classmethod
+    def validate_username_claim(cls, v: str) -> str:
+        """Validate that username_claim is not empty."""
+        if not v.strip():
+            raise checks.InvalidConfigurationError("username_claim must not be empty")
+        return v
+
+
 class AuthenticationConfig(BaseModel):
     """Authentication configuration."""
 
@@ -225,6 +275,7 @@ class AuthenticationConfig(BaseModel):
     oidc_jwks_cache_seconds: PositiveInt = 300
     oidc_metrics_access_claim: Optional[str] = None
     oidc_metrics_access_value: Optional[str] = None
+    oidc_issuers: Optional[list[OIDCIssuerConfig]] = None
 
     def validate_yaml(self) -> None:
         """Validate YAML containing authentication configuration section."""
@@ -240,6 +291,42 @@ class AuthenticationConfig(BaseModel):
 
     def _validate_oidc_settings(self) -> None:
         """Validate OIDC issuer, audience, and metrics permission settings."""
+        has_single_issuer = bool(self.oidc_issuer_url)
+        has_multi_issuer = bool(self.oidc_issuers)
+
+        if not has_single_issuer and not has_multi_issuer:
+            raise checks.InvalidConfigurationError(
+                "oidc_issuer_url or oidc_issuers is required when authentication module is oidc"
+            )
+
+        if has_single_issuer and has_multi_issuer:
+            raise checks.InvalidConfigurationError(
+                "Cannot configure both oidc_issuer_url and oidc_issuers; use one or the other"
+            )
+
+        if has_single_issuer:
+            self._validate_single_issuer()
+        else:
+            self._validate_multi_issuer()
+
+        if (self.oidc_metrics_access_claim is None) != (
+            self.oidc_metrics_access_value is None
+        ):
+            raise checks.InvalidConfigurationError(
+                "oidc_metrics_access_claim and oidc_metrics_access_value must be "
+                "configured together"
+            )
+        if self.oidc_metrics_access_claim is not None and not (
+            self.oidc_metrics_access_claim.strip()
+            and self.oidc_metrics_access_value
+            and self.oidc_metrics_access_value.strip()
+        ):
+            raise checks.InvalidConfigurationError(
+                "OIDC metrics access claim and value must not be empty"
+            )
+
+    def _validate_single_issuer(self) -> None:
+        """Validate single issuer OIDC configuration."""
         if not self.oidc_issuer_url:
             raise checks.InvalidConfigurationError(
                 "oidc_issuer_url is required when authentication module is oidc"
@@ -271,20 +358,17 @@ class AuthenticationConfig(BaseModel):
             raise checks.InvalidConfigurationError(
                 "oidc_username_claim must not be empty"
             )
-        if (self.oidc_metrics_access_claim is None) != (
-            self.oidc_metrics_access_value is None
-        ):
+
+    def _validate_multi_issuer(self) -> None:
+        """Validate multi-issuer OIDC configuration."""
+        if not self.oidc_issuers or len(self.oidc_issuers) == 0:
             raise checks.InvalidConfigurationError(
-                "oidc_metrics_access_claim and oidc_metrics_access_value must be "
-                "configured together"
+                "oidc_issuers must contain at least one issuer configuration"
             )
-        if self.oidc_metrics_access_claim is not None and not (
-            self.oidc_metrics_access_claim.strip()
-            and self.oidc_metrics_access_value
-            and self.oidc_metrics_access_value.strip()
-        ):
+        issuer_urls = [issuer.issuer_url for issuer in self.oidc_issuers]
+        if len(issuer_urls) != len(set(issuer_urls)):
             raise checks.InvalidConfigurationError(
-                "OIDC metrics access claim and value must not be empty"
+                "oidc_issuers must not contain duplicate issuer URLs"
             )
 
 

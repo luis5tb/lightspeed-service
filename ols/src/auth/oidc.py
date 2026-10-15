@@ -233,6 +233,56 @@ class OIDCTokenValidator:
         return discovery
 
 
+class MultiIssuerOIDCTokenValidator:
+    """Validate JWT bearer tokens against multiple trusted OIDC issuers."""
+
+    def __init__(self, issuer_configs: list[Any]) -> None:
+        """Initialize validators for each configured issuer.
+
+        Args:
+            issuer_configs: List of OIDCIssuerConfig instances. Uses Any type due to
+                circular import avoidance; runtime type safety provided by isinstance check.
+        """
+        from ols.app.models.config import AuthenticationConfig, OIDCIssuerConfig
+
+        self._validators: dict[str, OIDCTokenValidator] = {}
+        for issuer_config in issuer_configs:
+            if not isinstance(issuer_config, OIDCIssuerConfig):
+                raise OIDCProviderError("Invalid issuer configuration")
+            auth_config = AuthenticationConfig(
+                module="oidc",
+                oidc_issuer_url=issuer_config.issuer_url,
+                oidc_audience=issuer_config.audience,
+                oidc_username_claim=issuer_config.username_claim,
+                oidc_jwks_cache_seconds=issuer_config.jwks_cache_seconds,
+            )
+            self._validators[issuer_config.issuer_url] = OIDCTokenValidator(auth_config)
+
+    async def validate(self, token: str) -> dict[str, Any]:
+        """Extract issuer from token and validate with the matching validator."""
+        try:
+            unverified_claims = jwt.decode(
+                token, options={"verify_signature": False, "verify_exp": False}
+            )
+        except jwt.PyJWTError as error:
+            raise OIDCAuthenticationError(
+                "Bearer token could not be decoded"
+            ) from error
+
+        issuer = unverified_claims.get("iss")
+        if not isinstance(issuer, str) or not issuer:
+            raise OIDCAuthenticationError("Bearer token has no issuer claim")
+
+        validator = self._validators.get(issuer)
+        if validator is None:
+            logger.warning("Bearer token from untrusted issuer: %s", issuer)
+            raise OIDCAuthenticationError(
+                f"Bearer token issuer is not trusted: {issuer}"
+            )
+
+        return await validator.validate(token)
+
+
 class AuthDependency(AuthDependencyInterface):
     """Validate OIDC bearer tokens and return OLS's standard auth tuple."""
 
@@ -244,7 +294,18 @@ class AuthDependency(AuthDependencyInterface):
         """Initialize the dependency and its path-specific authorization policy."""
         self._authentication_config = authentication_config
         self._virtual_path = virtual_path
-        self._validator = OIDCTokenValidator(authentication_config)
+        self._multi_issuer = bool(authentication_config.oidc_issuers)
+        if self._multi_issuer:
+            self._validator = MultiIssuerOIDCTokenValidator(
+                authentication_config.oidc_issuers
+            )
+            self._issuer_config_map = {
+                issuer.issuer_url: issuer
+                for issuer in authentication_config.oidc_issuers
+            }
+        else:
+            self._validator = OIDCTokenValidator(authentication_config)
+            self._issuer_config_map = {}
 
     def _has_metrics_access(self, claims: dict[str, Any]) -> bool:
         """Return whether the configured OIDC claim grants metrics access."""
@@ -303,11 +364,23 @@ class AuthDependency(AuthDependencyInterface):
             )
 
         subject = claims["sub"]
-        claim_name = self._authentication_config.oidc_username_claim
+        issuer = claims.get("iss", "")
+
+        if self._multi_issuer:
+            issuer_config = self._issuer_config_map.get(issuer)
+            if issuer_config is None:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Unauthorized: Token issuer configuration not found",
+                )
+            claim_name = issuer_config.username_claim
+        else:
+            claim_name = self._authentication_config.oidc_username_claim
+            issuer = str(self._authentication_config.oidc_issuer_url)
+
         username_claim = claims.get(claim_name)
         username = username_claim.strip() if isinstance(username_claim, str) else ""
         username = username or subject
-        issuer = str(self._authentication_config.oidc_issuer_url)
         user_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{issuer}:{subject}"))
         request.state.oidc_claims = claims
         request.state.oidc_subject = subject

@@ -116,10 +116,27 @@ ols_config:
     k8s_ca_cert_path: "/Users/home/ca.crt"
     skip_tls_verification: false
     # To use OIDC JWT authentication instead, set module to "oidc" and provide:
+    # Single issuer configuration (legacy):
     # oidc_issuer_url: "https://identity.example.com/realms/ols"
     # oidc_audience: "openshift-lightspeed"
     # oidc_username_claim: "preferred_username"
     # oidc_jwks_cache_seconds: 300
+    #
+    # Multi-issuer configuration (supports tokens from multiple trusted IdPs):
+    # oidc_issuers:
+    #   - issuer_url: "https://sso.redhat.com/auth/realms/redhat"
+    #     audience: "openshift-lightspeed"
+    #     username_claim: "preferred_username"
+    #     jwks_cache_seconds: 300
+    #   - issuer_url: "https://sso.stage.redhat.com/auth/realms/redhat"
+    #     audience: "openshift-lightspeed"
+    #     username_claim: "email"
+    #     jwks_cache_seconds: 300
+    #   - issuer_url: "https://keycloak.example.com/realms/ols"
+    #     audience: "openshift-lightspeed"
+    #     username_claim: "preferred_username"
+    #     jwks_cache_seconds: 300
+    #
     # OIDC always uses verified HTTPS, independently of skip_tls_verification.
     # To permit OIDC metrics access, configure both:
     # oidc_metrics_access_claim: "groups"
