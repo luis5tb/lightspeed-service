@@ -44,7 +44,7 @@ from a2a.server.request_handlers import (
     DefaultRequestHandler,
     validate_request_params,
 )
-from a2a.server.routes.agent_card_routes import create_agent_card_routes
+from a2a.server.request_handlers.response_helpers import agent_card_to_dict
 from a2a.server.routes.common import ServerCallContextBuilder
 from a2a.server.routes.fastapi_routes import add_a2a_routes_to_fastapi
 from a2a.server.routes.jsonrpc_routes import create_jsonrpc_routes
@@ -55,13 +55,14 @@ from a2a.types.a2a_pb2 import (
     AgentInterface,
     AgentSkill,
 )
-from a2a.utils.constants import PROTOCOL_VERSION_1_0
+from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH, PROTOCOL_VERSION_1_0
 from a2a.utils.errors import InternalError, UnsupportedOperationError
 from fastapi import FastAPI, HTTPException
 from google.protobuf.json_format import ParseDict
 from google.protobuf.struct_pb2 import Struct
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
+from starlette.routing import Route
 
 from ols.app.endpoints import a2a_auth
 from ols.app.endpoints.a2a_auth import A2AConfigurationError, CallerIdentity
@@ -405,11 +406,20 @@ def register_routes(
                 status_code=503, detail=_NOT_CONFIGURED_DETAIL
             ) from error
 
+    async def _get_agent_card(_request: Request) -> JSONResponse:
+        card = await _card_modifier(static_card)
+        card_dict = agent_card_to_dict(card)
+        if card.supported_interfaces:
+            # ``url`` was the endpoint field in earlier A2A card schemas.
+            # Retain it for clients that have not adopted supportedInterfaces.
+            card_dict["url"] = card.supported_interfaces[0].url
+        return JSONResponse(card_dict)
+
     add_a2a_routes_to_fastapi(
         app,
-        agent_card_routes=create_agent_card_routes(
-            static_card, card_modifier=_card_modifier
-        ),
+        agent_card_routes=[
+            Route(AGENT_CARD_WELL_KNOWN_PATH, _get_agent_card, methods=["GET"])
+        ],
         jsonrpc_routes=create_jsonrpc_routes(
             request_handler, rpc_url=_RPC_PATH, context_builder=_A2ACallContextBuilder()
         ),
