@@ -11,7 +11,7 @@ import ssl
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import httpx
@@ -71,6 +71,31 @@ def _positive_cache_seconds(name: str, default: str) -> int:
     return value
 
 
+def _parse_subject_issuer_map(raw: str) -> dict[str, str]:
+    """Parse the external-issuer -> IdP-alias map (JSON object) from env.
+
+    Empty/unset yields an empty map (native-only exchange). Values must be a
+    flat object of non-empty string keys (issuer URLs) to string aliases.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as error:
+        raise A2AConfigurationError(
+            "A2A_EXCHANGE_SUBJECT_ISSUER_MAP must be a JSON object"
+        ) from error
+    if not isinstance(parsed, dict) or not all(
+        isinstance(k, str) and k and isinstance(v, str) and v
+        for k, v in parsed.items()
+    ):
+        raise A2AConfigurationError(
+            "A2A_EXCHANGE_SUBJECT_ISSUER_MAP must map issuer URLs to non-empty aliases"
+        )
+    return parsed
+
+
 @dataclass(frozen=True)
 class A2ASettings:
     """A2A endpoint settings from OLS config and deployment environment."""
@@ -90,6 +115,13 @@ class A2ASettings:
     keycloak_timeout_seconds: float = 5.0
     exchange_timeout_seconds: float = 10.0
     discovery_cache_seconds: int = 300
+    # Maps an EXTERNAL caller-token issuer URL -> the Keycloak identity-provider
+    # alias that brokers it. Keycloak cannot validate an external subject_token
+    # during RFC 8693 exchange unless the request names the IdP via
+    # `subject_issuer`; without it Keycloak treats the token as realm-native and
+    # fails with "subject_token validation failure". Native (same-realm) tokens
+    # are not in this map and are exchanged without subject_issuer, unchanged.
+    subject_issuer_map: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls) -> "A2ASettings":
@@ -141,6 +173,9 @@ class A2ASettings:
                 ),
                 "discovery_cache_seconds": _positive_cache_seconds(
                     "A2A_KEYCLOAK_DISCOVERY_CACHE_SECONDS", "300"
+                ),
+                "subject_issuer_map": _parse_subject_issuer_map(
+                    _env("A2A_EXCHANGE_SUBJECT_ISSUER_MAP")
                 ),
             }
         return cls(
@@ -283,8 +318,18 @@ class KeycloakTokenExchanger:
         self._discovery_expiry = 0.0
         self._discovery_lock = threading.Lock()
 
-    async def exchange(self, subject_token: str, client_assertion: str) -> str:
-        """Perform an RFC 8693 token exchange without sending a client id."""
+    async def exchange(
+        self,
+        subject_token: str,
+        client_assertion: str,
+        subject_issuer: Optional[str] = None,
+    ) -> str:
+        """Perform an RFC 8693 token exchange without sending a client id.
+
+        When ``subject_issuer`` is set (the caller token came from an external
+        IdP), it is sent so Keycloak brokers the token through that identity
+        provider instead of validating it as a realm-native token.
+        """
         data = {
             "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
             "subject_token": subject_token,
@@ -294,6 +339,8 @@ class KeycloakTokenExchanger:
             "client_assertion": client_assertion,
             "audience": self._settings.exchange_audience,
         }
+        if subject_issuer:
+            data["subject_issuer"] = subject_issuer
         try:
             verify = self._settings.tls_verify
         except (A2AConfigurationError, OSError, ssl.SSLError) as error:
@@ -456,9 +503,15 @@ class A2AAuthenticator:
         if self._workload is None or self._exchanger is None:
             raise A2AConfigurationError("Token exchange is enabled but not initialized")
         client_assertion = await self._workload.fetch()
+        # An external caller token (issuer not the local realm) must be brokered
+        # through its Keycloak IdP: name it via subject_issuer. Realm-native
+        # tokens aren't in the map and exchange unchanged.
+        caller_iss = caller.claims.get("iss") if isinstance(caller.claims, dict) else None
+        subject_issuer = self.settings.subject_issuer_map.get(caller_iss) if caller_iss else None
         return await self._exchanger.exchange(
             subject_token=caller.token,
             client_assertion=client_assertion,
+            subject_issuer=subject_issuer,
         )
 
 
