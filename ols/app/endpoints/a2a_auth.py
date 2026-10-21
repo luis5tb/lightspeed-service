@@ -340,12 +340,13 @@ class KeycloakTokenExchanger:
             "audience": self._settings.exchange_audience,
         }
         if subject_issuer:
-            data["subject_issuer"] = subject_issuer
-            # External IdP tokens are brokered JWTs: declare the subject token as
-            # a JWT so Keycloak validates its signature via the IdP's JWKS.
-            # Leaving it as access_token makes Keycloak call the IdP's token
-            # introspection endpoint ("Introspection endpoint not configured for
-            # IDP"), which a signature-validating brokering IdP does not have.
+            # External IdP token. Declare it as a JWT and let Keycloak match the
+            # brokering IdP by the token's `iss` claim (which must equal the IdP's
+            # registered issuer). Do NOT send `subject_issuer`: specifying it
+            # selects the access_token/introspection validation path, which fails
+            # with "Introspection endpoint not configured for IDP" on a
+            # JWKS-validating brokering IdP. The `jwt` type validates the token's
+            # signature via the IdP's JWKS instead.
             data["subject_token_type"] = "urn:ietf:params:oauth:token-type:jwt"
         try:
             verify = self._settings.tls_verify
