@@ -327,8 +327,8 @@ class KeycloakTokenExchanger:
         """Perform an RFC 8693 token exchange without sending a client id.
 
         When ``subject_issuer`` is set (the caller token came from an external
-        IdP), it is sent so Keycloak brokers the token through that identity
-        provider instead of validating it as a realm-native token.
+        IdP), it is sent so Keycloak brokers the token through that issuer
+        instead of validating it as a realm-native token.
         """
         data = {
             "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
@@ -340,14 +340,9 @@ class KeycloakTokenExchanger:
             "audience": self._settings.exchange_audience,
         }
         if subject_issuer:
-            # External IdP token. Declare it as a JWT and let Keycloak match the
-            # brokering IdP by the token's `iss` claim (which must equal the IdP's
-            # registered issuer). Do NOT send `subject_issuer`: specifying it
-            # selects the access_token/introspection validation path, which fails
-            # with "Introspection endpoint not configured for IDP" on a
-            # JWKS-validating brokering IdP. The `jwt` type validates the token's
-            # signature via the IdP's JWKS instead.
-            data["subject_token_type"] = "urn:ietf:params:oauth:token-type:jwt"
+            # Keycloak 26.4's standard token exchange only accepts access-token
+            # subject tokens and uses subject_issuer to select the external IdP.
+            data["subject_issuer"] = subject_issuer
         try:
             verify = self._settings.tls_verify
         except (A2AConfigurationError, OSError, ssl.SSLError) as error:
@@ -511,8 +506,8 @@ class A2AAuthenticator:
             raise A2AConfigurationError("Token exchange is enabled but not initialized")
         client_assertion = await self._workload.fetch()
         # An external caller token (issuer not the local realm) must be brokered
-        # through its Keycloak IdP: name it via subject_issuer. Realm-native
-        # tokens aren't in the map and exchange unchanged.
+        # through its Keycloak IdP. Realm-native tokens aren't in the map and
+        # exchange without subject_issuer.
         caller_iss = caller.claims.get("iss") if isinstance(caller.claims, dict) else None
         subject_issuer = self.settings.subject_issuer_map.get(caller_iss) if caller_iss else None
         return await self._exchanger.exchange(
