@@ -711,6 +711,60 @@ async def test_keycloak_exchange_requests_mcp_token_without_client_id(
     assert payload["subject_token"] == EXCHANGE_CALLER_BEARER
     assert payload["client_assertion"] == EXCHANGE_ASSERTION
     assert "client_id" not in payload
+    assert "subject_issuer" not in payload
+
+
+@pytest.mark.asyncio
+async def test_keycloak_exchange_sends_external_subject_issuer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Broker an external access token without downgrading it to a JWT."""
+    calls: list[tuple[str, Optional[dict[str, Any]]]] = []
+
+    class _FakeExchangeClient:
+        async def __aenter__(self) -> _FakeExchangeClient:
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+        async def get(self, _url: str, **_: Any) -> _FakeResponse:
+            return _FakeResponse(
+                {"issuer": ISSUER, "token_endpoint": f"{ISSUER}/token"}
+            )
+
+        async def post(
+            self, url: str, data: Optional[dict[str, Any]] = None
+        ) -> _FakeResponse:
+            calls.append((url, data))
+            return _FakeResponse({"access_token": "exchange-token"})
+
+    monkeypatch.setattr(
+        a2a_auth.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _FakeExchangeClient(),
+    )
+    exchanger = a2a_auth.KeycloakTokenExchanger(
+        make_settings(keycloak_issuer_url=ISSUER)
+    )
+    external_issuer = "https://sso.stage.redhat.com/auth/realms/redhat-external"
+
+    token = await exchanger.exchange(
+        EXCHANGE_CALLER_BEARER,
+        EXCHANGE_ASSERTION,
+        subject_issuer=external_issuer,
+    )
+
+    assert token == "exchange-token"
+    endpoint, payload = calls[1]
+    assert endpoint == f"{ISSUER}/token"
+    assert payload is not None
+    assert payload["subject_token"] == EXCHANGE_CALLER_BEARER
+    assert (
+        payload["subject_token_type"]
+        == "urn:ietf:params:oauth:token-type:access_token"
+    )
+    assert payload["subject_issuer"] == external_issuer
 
 
 @pytest.mark.asyncio
