@@ -30,19 +30,23 @@ import logging
 import threading
 import uuid
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.tasks import TaskUpdater
-from a2a.types.a2a_pb2 import Part, Task, TaskState, TaskStatus
+from a2a.types.a2a_pb2 import Message, Part, Role, Task, TaskState, TaskStatus
 from a2a.utils.errors import UnsupportedOperationError
 from fastapi import HTTPException
 from starlette.concurrency import run_in_threadpool
 
 from ols.app.endpoints import a2a_auth
-from ols.app.endpoints.a2a_auth import A2AExchangeError, A2AWorkloadIdentityError
+from ols.app.endpoints.a2a_auth import (
+    A2AExchangeError,
+    A2ASubjectTokenRejectedError,
+    A2AWorkloadIdentityError,
+)
 from ols.app.endpoints.ols import generate_response, process_request
 from ols.app.endpoints.streaming_ols import response_processing_wrapper
 from ols.app.models.models import (
@@ -82,6 +86,14 @@ _PROGRESS_CHUNK_TYPES = frozenset(
         StreamChunkType.HISTORY_COMPRESSION_START,
         StreamChunkType.HISTORY_COMPRESSION_END,
     }
+)
+
+# Status text for a task paused in TASK_STATE_AUTH_REQUIRED. It names what the
+# caller must do, never the token or the IdP's error details.
+AUTH_REQUIRED_MESSAGE = (
+    "The caller's credentials could not be exchanged for OpenShift MCP access, "
+    "most likely because the token expired. Send a new message on this task, "
+    "authenticated with a fresh token for the same caller, to continue."
 )
 
 _MAX_CONTEXT_CONVERSATIONS = 1024
@@ -242,20 +254,31 @@ class OLSAgentExecutor(AgentExecutor):
                 ),
             )
 
-        # The framework requires the first event for a new task to be the
-        # Task object itself; TaskUpdater only emits status/artifact *update*
-        # events, which it rejects if no Task has been enqueued yet.
-        await event_queue.enqueue_event(
-            Task(
-                id=context.task_id,
-                context_id=context.context_id,
-                status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+        resuming = _is_auth_resume(context)
+        if not resuming:
+            # The framework requires the first event for a new task to be the
+            # Task object itself; TaskUpdater only emits status/artifact
+            # *update* events, which it rejects if no Task has been enqueued
+            # yet. The request is kept in the task's history so a task paused
+            # for credentials can re-run it when the caller renews.
+            await event_queue.enqueue_event(
+                Task(
+                    id=context.task_id,
+                    context_id=context.context_id,
+                    status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+                    history=[context.message] if context.message else [],
+                )
             )
-        )
 
         try:
-            text = _validated_text_input(context)
-            mode = _requested_mode(context)
+            # A renewal follow-up only carries fresh credentials (in its
+            # Authorization header, already validated into ``caller``). The
+            # investigation to run is still the task's original request.
+            request_message = (
+                _original_request(context) if resuming else context.message
+            )
+            text = _validated_text_input(request_message)
+            mode = _requested_mode(request_message)
         except A2AInputError as error:
             _audit("error", action="validate A2A request")
             await updater.failed(updater.new_agent_message([Part(text=str(error))]))
@@ -293,49 +316,10 @@ class OLSAgentExecutor(AgentExecutor):
             caller.task_scope, context.context_id, processed_request.conversation_id
         )
 
-        authenticator = a2a_auth.get_authenticator()
-        if authenticator.settings.token_exchange_enabled:
-            try:
-                processed_request.user_token = await authenticator.exchange_for_mcp(
-                    caller
-                )
-            except (A2AWorkloadIdentityError, A2AExchangeError) as error:
-                logger.error(
-                    "A2A token exchange failed for cluster %s: %s",
-                    caller.cluster_id,
-                    error,
-                )
-                if processed_request.audit_ctx:
-                    audit_ctx = processed_request.audit_ctx
-                    with audit_ctx.span("request.lifecycle"):
-                        audit_ctx.logger.request_started(
-                            mode=llm_request.mode,
-                            query=llm_request.query,
-                            attachments=[
-                                attachment.model_dump()
-                                for attachment in processed_request.attachments
-                            ],
-                            provider=llm_request.provider,
-                            model=llm_request.model,
-                            capture_content=audit_ctx.capture_content,
-                        )
-                        audit_ctx.logger.request_failed(
-                            error="mcp_token_exchange_failed"
-                        )
-                _audit("error", action="exchange MCP credentials")
-                await updater.failed(
-                    updater.new_agent_message(
-                        [
-                            Part(
-                                text=(
-                                    "Unable to obtain credentials for the OpenShift "
-                                    "MCP server"
-                                )
-                            )
-                        ]
-                    )
-                )
-                return
+        if not await self._exchange_credentials(
+            caller, updater, processed_request, llm_request, _audit
+        ):
+            return
 
         await updater.start_work()
 
@@ -351,6 +335,60 @@ class OLSAgentExecutor(AgentExecutor):
 
         _audit("ok")
         await updater.complete(updater.new_agent_message([Part(text=response_text)]))
+
+    async def _exchange_credentials(
+        self,
+        caller: CallerIdentity,
+        updater: TaskUpdater,
+        processed_request: ProcessedRequest,
+        llm_request: LLMRequest,
+        audit: Callable[..., None],
+    ) -> bool:
+        """Obtain MCP credentials; return whether the query may proceed.
+
+        A refused caller token pauses the task in AUTH_REQUIRED, because only
+        the caller can fix it by renewing on this task. Every other exchange
+        problem is an infrastructure failure and fails the task.
+        """
+        authenticator = a2a_auth.get_authenticator()
+        if not authenticator.settings.token_exchange_enabled:
+            return True
+        try:
+            processed_request.user_token = await authenticator.exchange_for_mcp(caller)
+            return True
+        except A2ASubjectTokenRejectedError as error:
+            logger.warning(
+                "A2A token exchange needs fresh caller credentials for cluster %s: %s",
+                caller.cluster_id,
+                error,
+            )
+            _record_exchange_failure(
+                processed_request, llm_request, "mcp_token_exchange_auth_required"
+            )
+            audit("auth_required", action="exchange MCP credentials")
+            await updater.requires_auth(
+                updater.new_agent_message([Part(text=AUTH_REQUIRED_MESSAGE)])
+            )
+        except (A2AWorkloadIdentityError, A2AExchangeError) as error:
+            logger.error(
+                "A2A token exchange failed for cluster %s: %s",
+                caller.cluster_id,
+                error,
+            )
+            _record_exchange_failure(
+                processed_request, llm_request, "mcp_token_exchange_failed"
+            )
+            audit("error", action="exchange MCP credentials")
+            await updater.failed(
+                updater.new_agent_message(
+                    [
+                        Part(
+                            text="Unable to obtain credentials for the OpenShift MCP server"
+                        )
+                    ]
+                )
+            )
+        return False
 
     async def _run_query(
         self,
@@ -497,26 +535,67 @@ class OLSAgentExecutor(AgentExecutor):
         )
 
 
+def _record_exchange_failure(
+    processed_request: ProcessedRequest, llm_request: LLMRequest, error: str
+) -> None:
+    """Record a request that stopped at the MCP credential exchange."""
+    audit_ctx = processed_request.audit_ctx
+    if not audit_ctx:
+        return
+    with audit_ctx.span("request.lifecycle"):
+        audit_ctx.logger.request_started(
+            mode=llm_request.mode,
+            query=llm_request.query,
+            attachments=[
+                attachment.model_dump() for attachment in processed_request.attachments
+            ],
+            provider=llm_request.provider,
+            model=llm_request.model,
+            capture_content=audit_ctx.capture_content,
+        )
+        audit_ctx.logger.request_failed(error=error)
+
+
 class A2AInputError(ValueError):
     """Raised when an A2A message cannot be mapped to an OLS text query."""
 
 
-def _validated_text_input(context: RequestContext) -> str:
+def _is_auth_resume(context: RequestContext) -> bool:
+    """Return whether this message renews a task paused for credentials."""
+    task = context.current_task
+    return task is not None and task.status.state == TaskState.TASK_STATE_AUTH_REQUIRED
+
+
+def _original_request(context: RequestContext) -> Message:
+    """Return the user message that started a task paused for credentials.
+
+    The SDK appends the renewal follow-up (and the paused status message) to
+    the task history, so the original request is the first user message that
+    is not the current one.
+    """
+    task = context.current_task
+    current_id = context.message.message_id if context.message else ""
+    for message in task.history if task is not None else ():
+        if message.role == Role.ROLE_USER and message.message_id != current_id:
+            return message
+    raise A2AInputError("The paused task no longer has its original request")
+
+
+def _validated_text_input(message: Message | None) -> str:
     """Require a non-empty message containing only text parts."""
-    message = context.message
-    if not message.parts:
+    if message is None or not message.parts:
         raise A2AInputError("Message has no text content")
     if any(part.WhichOneof("content") != "text" for part in message.parts):
         raise A2AInputError("Only text content is supported")
-    text = context.get_user_input()
+    text = "\n".join(part.text for part in message.parts)
     if not text or not text.strip():
         raise A2AInputError("Message has no text content")
     return text
 
 
-def _requested_mode(context: RequestContext) -> QueryMode:
+def _requested_mode(message: Message) -> QueryMode:
     """Read the optional OLS mode from A2A message metadata (query-mode extension)."""
-    metadata = context.message.metadata
+    metadata = message.metadata
     fields = getattr(metadata, "fields", None)
     if fields is not None:
         mode_value = fields.get(OLS_MODE_METADATA_KEY) if fields is not None else None

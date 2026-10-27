@@ -35,6 +35,7 @@ single replica until durable task and context storage is available.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import TYPE_CHECKING
 
@@ -73,6 +74,7 @@ from ols.app.endpoints.a2a_executor import (
 )
 from ols.app.endpoints.a2a_task_store import (
     ADMISSION_LEASE_STATE_KEY,
+    DEFAULT_AUTH_REQUIRED_TIMEOUT_SECONDS,
     MAX_ACTIVE_A2A_TASKS,
     MAX_RETAINED_TERMINAL_A2A_TASKS,
     BoundedInMemoryTaskStore,
@@ -97,6 +99,10 @@ if TYPE_CHECKING:
 _RPC_PATH = "/a2a"
 
 _NOT_CONFIGURED_DETAIL = "A2A is not configured"
+
+# How long a task paused in TASK_STATE_AUTH_REQUIRED waits for the caller to
+# renew its credentials before it fails and frees its admission slot.
+AUTH_REQUIRED_TIMEOUT_ENV = "A2A_AUTH_REQUIRED_TIMEOUT_SECONDS"
 
 
 def is_a2a_enabled() -> bool:
@@ -211,6 +217,11 @@ class _AdmissionRequestHandler(DefaultRequestHandler):
         self._admission_controller = admission_controller
         self._streaming_supported = agent_card.capabilities.streaming
 
+    async def _expire_paused_tasks(self) -> None:
+        """Fail tasks whose credential renewal window closed, freeing their slots."""
+        if isinstance(self.task_store, BoundedInMemoryTaskStore):
+            await self.task_store.expire_auth_required()
+
     def _reserve_new_task(
         self, params: SendMessageRequest, context: ServerCallContext
     ) -> TaskAdmissionLease | None:
@@ -230,6 +241,7 @@ class _AdmissionRequestHandler(DefaultRequestHandler):
         self, params: SendMessageRequest, context: ServerCallContext
     ) -> Message | Task:
         """Admit a new request before delegating to the SDK handler."""
+        await self._expire_paused_tasks()
         lease = self._reserve_new_task(params, context)
         try:
             return await super().on_message_send(params, context)
@@ -246,6 +258,7 @@ class _AdmissionRequestHandler(DefaultRequestHandler):
             raise UnsupportedOperationError(
                 message="Streaming is not supported by the agent"
             )
+        await self._expire_paused_tasks()
         lease = self._reserve_new_task(params, context)
         stream = super().on_message_send_stream(params, context)
         try:
@@ -369,8 +382,29 @@ def _owner_from_context(context: ServerCallContext) -> str:
     return caller.task_scope if caller else ""
 
 
+def _auth_required_timeout_seconds() -> float:
+    """Read how long a task may wait for renewed caller credentials."""
+    raw = os.environ.get(AUTH_REQUIRED_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_AUTH_REQUIRED_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if not math.isfinite(value) or value <= 0:
+        logger.error(
+            "%s must be a positive number of seconds; using %s",
+            AUTH_REQUIRED_TIMEOUT_ENV,
+            DEFAULT_AUTH_REQUIRED_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_AUTH_REQUIRED_TIMEOUT_SECONDS
+    return value
+
+
 def register_routes(
-    app: FastAPI, admission_controller: TaskAdmissionController | None = None
+    app: FastAPI,
+    admission_controller: TaskAdmissionController | None = None,
+    auth_required_timeout_seconds: float | None = None,
 ) -> None:
     """Mount the A2A agent-card and JSON-RPC routes directly on ``app``.
 
@@ -390,6 +424,9 @@ def register_routes(
     task_store = BoundedInMemoryTaskStore(
         owner_resolver=_owner_from_context,
         admission_controller=controller,
+        auth_required_timeout_seconds=(
+            auth_required_timeout_seconds or _auth_required_timeout_seconds()
+        ),
     )
     request_handler = _AdmissionRequestHandler(
         agent_executor=OLSAgentExecutor(),

@@ -45,6 +45,23 @@ class A2AExchangeError(Exception):
     """Raised when the RFC 8693 exchange for an MCP-scoped token fails."""
 
 
+class A2ASubjectTokenRejectedError(A2AExchangeError):
+    """The caller's token was refused as the exchange subject (e.g. expired).
+
+    Unlike other exchange failures, this one can be fixed by the caller: the
+    task pauses in ``TASK_STATE_AUTH_REQUIRED`` until the caller sends a
+    follow-up message authenticated with a fresh token.
+    """
+
+
+# OAuth error codes with which Keycloak refuses the *subject* token of a token
+# exchange (expired, revoked, or no longer backed by an active session).
+# Client authentication and configuration problems use other codes
+# (invalid_client, unauthorized_client, invalid_request, ...) and stay plain
+# exchange failures, because a fresh caller token cannot fix them.
+_SUBJECT_TOKEN_REJECTED_ERRORS = frozenset({"invalid_token", "invalid_grant"})
+
+
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
@@ -356,6 +373,10 @@ class KeycloakTokenExchanger:
             ) as client:
                 token_endpoint = await self._token_endpoint(client)
                 response = await client.post(token_endpoint, data=data)
+                if _subject_token_rejected(response):
+                    raise A2ASubjectTokenRejectedError(
+                        "Keycloak rejected the caller token for exchange"
+                    )
                 response.raise_for_status()
                 payload = response.json()
         except A2AExchangeError:
@@ -405,6 +426,31 @@ class KeycloakTokenExchanger:
                 time.monotonic() + self._settings.discovery_cache_seconds
             )
         return token_endpoint
+
+
+def _subject_token_rejected(response: httpx.Response) -> bool:
+    """Return whether a token-endpoint error refuses the subject token itself.
+
+    Only the OAuth ``error`` code is read. ``error_description`` and the raw
+    body are never logged or surfaced, because an IdP may echo submitted
+    credentials in them.
+    """
+    if response.status_code not in {400, 401}:
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    error_code = payload.get("error") if isinstance(payload, dict) else None
+    return error_code in _SUBJECT_TOKEN_REJECTED_ERRORS
+
+
+def _token_expired(claims: Any) -> bool:
+    """Return whether validated claims carry an ``exp`` that has passed."""
+    expires_at = claims.get("exp") if isinstance(claims, dict) else None
+    if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
+        return False
+    return expires_at <= time.time()
 
 
 class A2AAuthenticator:
@@ -504,6 +550,11 @@ class A2AAuthenticator:
             return caller.token
         if self._workload is None or self._exchanger is None:
             raise A2AConfigurationError("Token exchange is enabled but not initialized")
+        # The token passed validation moments ago, but it can expire before the
+        # exchange (or before a paused task is resumed). Asking Keycloak would
+        # only fail, so report it as renewable straight away.
+        if _token_expired(caller.claims):
+            raise A2ASubjectTokenRejectedError("The caller token has expired")
         client_assertion = await self._workload.fetch()
         # An external caller token (issuer not the local realm) must be brokered
         # through its Keycloak IdP. Realm-native tokens aren't in the map and

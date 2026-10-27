@@ -942,3 +942,113 @@ def test_audit_record_escapes_newlines_in_request_id() -> None:
 
     assert "\n" not in record
     assert 'request_id="request-1\\noutcome=forged"' in record
+
+
+def _token_endpoint_returning(
+    monkeypatch: pytest.MonkeyPatch, response: _FakeResponse
+) -> a2a_auth.KeycloakTokenExchanger:
+    """Build an exchanger whose token endpoint answers with ``response``."""
+
+    class _FakeExchangeClient:
+        async def __aenter__(self) -> _FakeExchangeClient:
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+        async def get(self, _url: str, **_: Any) -> _FakeResponse:
+            """Serve the discovery document."""
+            return _FakeResponse(
+                {"issuer": ISSUER, "token_endpoint": f"{ISSUER}/token"}
+            )
+
+        async def post(
+            self, _url: str, data: Optional[dict[str, Any]] = None
+        ) -> _FakeResponse:
+            """Answer the token request with the scripted response."""
+            return response
+
+    monkeypatch.setattr(
+        a2a_auth.httpx, "AsyncClient", lambda **_kwargs: _FakeExchangeClient()
+    )
+    return a2a_auth.KeycloakTokenExchanger(make_settings(keycloak_issuer_url=ISSUER))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_code", ["invalid_token", "invalid_grant"])
+async def test_keycloak_rejecting_the_subject_token_is_renewable(
+    monkeypatch: pytest.MonkeyPatch, error_code: str
+) -> None:
+    """Classify a refused subject token so the task can ask for renewal."""
+    exchanger = _token_endpoint_returning(
+        monkeypatch,
+        _FakeResponse(
+            {"error": error_code, "error_description": EXCHANGE_CALLER_BEARER},
+            status_code=400,
+        ),
+    )
+
+    with pytest.raises(a2a_auth.A2ASubjectTokenRejectedError) as caught:
+        await exchanger.exchange(EXCHANGE_CALLER_BEARER, EXCHANGE_ASSERTION)
+
+    assert EXCHANGE_CALLER_BEARER not in str(caught.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "payload"),
+    [
+        (401, {"error": "invalid_client"}),
+        (400, {"error": "invalid_request"}),
+        (403, {"error": "access_denied"}),
+        (500, {"error": "invalid_token"}),
+    ],
+)
+async def test_other_exchange_errors_are_not_renewable(
+    monkeypatch: pytest.MonkeyPatch, status_code: int, payload: dict[str, Any]
+) -> None:
+    """Client, configuration, and server failures cannot be fixed by the caller."""
+    exchanger = _token_endpoint_returning(
+        monkeypatch, _FakeResponse(payload, status_code=status_code)
+    )
+
+    with pytest.raises(a2a_auth.A2AExchangeError) as caught:
+        await exchanger.exchange(EXCHANGE_CALLER_BEARER, EXCHANGE_ASSERTION)
+
+    assert not isinstance(caught.value, a2a_auth.A2ASubjectTokenRejectedError)
+
+
+@pytest.mark.asyncio
+async def test_expired_caller_token_is_renewable_without_calling_keycloak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip a doomed exchange when the caller token has already expired."""
+    monkeypatch.setattr(
+        config.ols_config,
+        "authentication_config",
+        AuthenticationConfig(module="k8s"),
+    )
+    authenticator = a2a_auth.A2AAuthenticator(
+        make_settings(
+            token_exchange_enabled=True,
+            keycloak_issuer_url=ISSUER,
+            spiffe_jwt_audience=ISSUER,
+        )
+    )
+    fetch = AsyncMock(return_value=EXCHANGE_ASSERTION)
+    exchange = AsyncMock(return_value=EXCHANGE_RESULT)
+    monkeypatch.setattr(authenticator._workload, "fetch", fetch)
+    monkeypatch.setattr(authenticator._exchanger, "exchange", exchange)
+    caller = a2a_auth.CallerIdentity(
+        sub="user-1",
+        claims={"iss": ISSUER, "exp": int(time.time()) - 1},
+        cluster_id=CLUSTER_ID,
+        token=EXCHANGE_CALLER_BEARER,
+        request_id="request-1",
+    )
+
+    with pytest.raises(a2a_auth.A2ASubjectTokenRejectedError):
+        await authenticator.exchange_for_mcp(caller)
+
+    fetch.assert_not_awaited()
+    exchange.assert_not_awaited()

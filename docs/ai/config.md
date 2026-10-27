@@ -162,7 +162,12 @@ process-local. At most 1,024 tasks may be in flight; excess new requests get
 JSON-RPC error `-32603` with `retryable: true` metadata. The latest 1,024
 terminal task results and 1,024 context bindings are retained separately.
 Older terminal tasks may return not found, and an evicted idle context starts
-a new OLS conversation. See `.ai/spec/what/a2a.md`.
+a new OLS conversation. When Keycloak refuses an expired or revoked caller token
+during exchange, the task pauses in `TASK_STATE_AUTH_REQUIRED`; the caller
+renews by messaging the same task with a fresh token, and OLS re-runs the
+original request. `A2A_AUTH_REQUIRED_TIMEOUT_SECONDS` (default `900`) bounds the
+wait before the task fails and frees its slot; an invalid value is logged and
+the default is used. See `.ai/spec/what/a2a.md`.
 
 ```yaml
 a2a:

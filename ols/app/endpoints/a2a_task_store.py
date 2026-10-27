@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import threading
+import time
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -12,8 +14,12 @@ from a2a.server.tasks import InMemoryTaskStore, TaskStore
 from a2a.types.a2a_pb2 import (
     ListTasksRequest,
     ListTasksResponse,
+    Message,
+    Part,
+    Role,
     Task,
     TaskState,
+    TaskStatus,
 )
 from a2a.utils.errors import InternalError
 
@@ -25,6 +31,10 @@ if TYPE_CHECKING:
 ADMISSION_LEASE_STATE_KEY = "_ols_a2a_admission_lease"
 MAX_ACTIVE_A2A_TASKS = 1024
 MAX_RETAINED_TERMINAL_A2A_TASKS = 1024
+DEFAULT_AUTH_REQUIRED_TIMEOUT_SECONDS = 900.0
+AUTH_RENEWAL_TIMEOUT_MESSAGE = (
+    "Fresh credentials were not supplied in time; the investigation was not run."
+)
 
 _TERMINAL_TASK_STATES = frozenset(
     {
@@ -130,16 +140,24 @@ class BoundedInMemoryTaskStore(TaskStore):
         owner_resolver: OwnerResolver,
         admission_controller: TaskAdmissionController,
         max_terminal_tasks: int = MAX_RETAINED_TERMINAL_A2A_TASKS,
+        auth_required_timeout_seconds: float = DEFAULT_AUTH_REQUIRED_TIMEOUT_SECONDS,
     ) -> None:
         """Initialize the owner-scoped store and terminal-result window."""
         if max_terminal_tasks < 1:
             raise ValueError("max_terminal_tasks must be positive")
+        if auth_required_timeout_seconds <= 0:
+            raise ValueError("auth_required_timeout_seconds must be positive")
         self._owner_resolver = owner_resolver
         self._admission_controller = admission_controller
         self._max_terminal_tasks = max_terminal_tasks
         self._store = InMemoryTaskStore(owner_resolver=owner_resolver)
         self._active_tasks: dict[tuple[str, str], TaskAdmissionLease] = {}
         self._terminal_tasks: OrderedDict[tuple[str, str], None] = OrderedDict()
+        # Tasks paused in TASK_STATE_AUTH_REQUIRED keep their admission lease
+        # while they wait for the caller to renew; each has a monotonic
+        # deadline after which it fails and releases that lease.
+        self._auth_required_timeout = auth_required_timeout_seconds
+        self._auth_required_deadlines: dict[tuple[str, str], float] = {}
         self._metadata_lock: LockType = threading.Lock()
 
     def _prepare_task_save(
@@ -205,6 +223,7 @@ class BoundedInMemoryTaskStore(TaskStore):
                 self._rollback_new_task(key, new_lease)
             raise
 
+        self._track_auth_required(key, task.status.state)
         if not is_terminal:
             return
 
@@ -214,8 +233,60 @@ class BoundedInMemoryTaskStore(TaskStore):
         for task_owner, task_id in evictions:
             await self._store.delete(task_id, _owner_context(task_owner))
 
+    def _track_auth_required(self, key: tuple[str, str], state: int) -> None:
+        """Start a renewal deadline on entering AUTH_REQUIRED; clear it otherwise."""
+        with self._metadata_lock:
+            if state == TaskState.TASK_STATE_AUTH_REQUIRED:
+                self._auth_required_deadlines[key] = (
+                    time.monotonic() + self._auth_required_timeout
+                )
+            else:
+                self._auth_required_deadlines.pop(key, None)
+
+    async def expire_auth_required(self) -> int:
+        """Fail tasks whose credential renewal deadline passed; return the count.
+
+        Called before admission and on reads, so an abandoned paused task both
+        frees its slot and reports a clear failure to a polling caller.
+        """
+        now = time.monotonic()
+        with self._metadata_lock:
+            due = [
+                key
+                for key, deadline in self._auth_required_deadlines.items()
+                if deadline <= now
+            ]
+            for key in due:
+                del self._auth_required_deadlines[key]
+        expired = 0
+        for owner, task_id in due:
+            context = _owner_context(owner)
+            task = await self._store.get(task_id, context)
+            if task is None or task.status.state != TaskState.TASK_STATE_AUTH_REQUIRED:
+                continue
+            failed = Task()
+            failed.CopyFrom(task)
+            if failed.status.HasField("message"):
+                failed.history.append(failed.status.message)
+            failed.status.CopyFrom(
+                TaskStatus(
+                    state=TaskState.TASK_STATE_FAILED,
+                    message=Message(
+                        role=Role.ROLE_AGENT,
+                        message_id=uuid.uuid4().hex,
+                        task_id=failed.id,
+                        context_id=failed.context_id,
+                        parts=[Part(text=AUTH_RENEWAL_TIMEOUT_MESSAGE)],
+                    ),
+                )
+            )
+            await self.save(failed, context)
+            expired += 1
+        return expired
+
     async def get(self, task_id: str, context: ServerCallContext) -> Task | None:
         """Return a task only within its authenticated owner scope."""
+        await self.expire_auth_required()
         return await self._store.get(task_id, context)
 
     async def list(
@@ -224,6 +295,7 @@ class BoundedInMemoryTaskStore(TaskStore):
         context: ServerCallContext,
     ) -> ListTasksResponse:
         """List tasks using the SDK store's owner scoping and pagination."""
+        await self.expire_auth_required()
         return await self._store.list(params, context)
 
     async def delete(self, task_id: str, context: ServerCallContext) -> None:
@@ -232,3 +304,4 @@ class BoundedInMemoryTaskStore(TaskStore):
         await self._store.delete(task_id, context)
         with self._metadata_lock:
             self._terminal_tasks.pop((owner, task_id), None)
+            self._auth_required_deadlines.pop((owner, task_id), None)

@@ -48,6 +48,14 @@ OLS can expose an Agent2Agent protocol surface for delegated OpenShift investiga
 
 26. Each A2A investigation must emit a greppable `a2a_audit` log line without tokens, plus OLS `AuditContext` lifecycle events from the shared query pipeline.
 
+### Credential renewal
+
+27. When token exchange is enabled and Keycloak refuses the caller token as the exchange subject (OAuth error `invalid_token` or `invalid_grant`), or the validated token has already expired, the task must pause in `TASK_STATE_AUTH_REQUIRED` instead of failing. The status message must say how to renew and must not contain the token or the IdP's error description. Other exchange problems (client authentication, discovery, TLS, SPIFFE, server errors) must still fail the task.
+28. A caller renews by sending a message on the paused task, authenticated with a fresh token. Owner scoping applies, so only the same `(caller, cluster)` can renew. The follow-up's content is not a new query: OLS must re-run the task's original request with the fresh token. A refused renewal pauses the task again.
+29. The original request must be kept in the task history so it can be re-run.
+30. A paused task holds its admission slot. If it is not renewed within `A2A_AUTH_REQUIRED_TIMEOUT_SECONDS` (default 900), it must fail with a message saying fresh credentials were not supplied in time, and release its slot. A renewal after that is rejected because the task is terminal.
+31. A caller token that expires mid-investigation, after a successful exchange, is out of scope: MCP authorization errors are reported to the model as tool errors by the shared tool loop.
+
 ## Query-mode extension contract
 
 | Field | Value |

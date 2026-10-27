@@ -1534,3 +1534,171 @@ class TestMisconfiguration:
 
         assert response.status_code == 503
         assert response.json()["detail"] == "A2A is not configured"
+
+
+def _renewal_body(
+    task: dict[str, Any], text: str = "Fresh credentials attached"
+) -> dict:
+    """Build a follow-up SendMessage on a paused task (new message id)."""
+    body = send_message_body(text, id="req-renew")
+    body["params"]["message"].update(
+        messageId=f"renew-{uuid.uuid4().hex}",
+        taskId=task["id"],
+        contextId=task["contextId"],
+    )
+    return body
+
+
+def _get_task(client: TestClient, task_id: str, token: str) -> dict[str, Any]:
+    """Fetch a task through JSON-RPC GetTask."""
+    return client.post(
+        "/a2a",
+        json={
+            "jsonrpc": "2.0",
+            "id": "req-get",
+            "method": "GetTask",
+            "params": {"id": task_id},
+        },
+        headers=auth_headers(token),
+    ).json()
+
+
+class TestCredentialRenewal:
+    """A refused subject token pauses the task until the caller renews it."""
+
+    ORIGINAL_QUERY = "why is my pod crashlooping?"
+
+    @staticmethod
+    def _exchange_with(monkeypatch, *outcomes: Any) -> AsyncMock:
+        """Install an exchange-enabled authenticator with scripted outcomes."""
+        authenticator = a2a_auth.A2AAuthenticator(
+            make_settings(
+                token_exchange_enabled=True,
+                keycloak_issuer_url=ISSUER,
+                spiffe_jwt_audience=ISSUER,
+            )
+        )
+        exchange = AsyncMock(side_effect=list(outcomes))
+        monkeypatch.setattr(authenticator, "exchange_for_mcp", exchange)
+        monkeypatch.setattr(a2a_auth, "_authenticator", authenticator)
+        return exchange
+
+    def _pause(self, client, monkeypatch, rsa_keypair, *later_outcomes: Any):
+        captured = _stub_generate_response(monkeypatch, "investigation answer")
+        exchange = self._exchange_with(
+            monkeypatch,
+            a2a_auth.A2ASubjectTokenRejectedError("subject token expired"),
+            *later_outcomes,
+        )
+        token_a = make_token(rsa_keypair)
+        response = client.post(
+            "/a2a",
+            json=send_message_body(self.ORIGINAL_QUERY),
+            headers=auth_headers(token_a),
+        )
+        return response.json()["result"]["task"], captured, exchange, token_a
+
+    def test_rejected_subject_token_pauses_task_in_auth_required(
+        self, rsa_keypair, client, monkeypatch
+    ):
+        """Report AUTH_REQUIRED with guidance instead of failing the task."""
+        task, captured, _, token_a = self._pause(client, monkeypatch, rsa_keypair)
+
+        assert task["status"]["state"] == "TASK_STATE_AUTH_REQUIRED"
+        text = task["status"]["message"]["parts"][0]["text"]
+        assert "fresh token" in text
+        assert token_a not in text
+        assert not captured
+        polled = _get_task(client, task["id"], token_a)["result"]
+        assert polled["status"]["state"] == "TASK_STATE_AUTH_REQUIRED"
+
+    def test_follow_up_with_fresh_token_reruns_the_original_query(
+        self, rsa_keypair, client, monkeypatch
+    ):
+        """Resume with the follow-up's token, but answer the original request."""
+        task, captured, exchange, _ = self._pause(
+            client, monkeypatch, rsa_keypair, EXCHANGED_CREDENTIAL
+        )
+        token_b = make_token(rsa_keypair, expires_in=900)
+
+        response = client.post(
+            "/a2a", json=_renewal_body(task), headers=auth_headers(token_b)
+        )
+
+        resumed = response.json()["result"]["task"]
+        assert resumed["id"] == task["id"]
+        assert resumed["status"]["state"] == "TASK_STATE_COMPLETED"
+        assert captured["query"] == self.ORIGINAL_QUERY
+        assert captured["user_token"] == EXCHANGED_CREDENTIAL
+        assert exchange.await_count == 2
+        assert exchange.await_args_list[1].args[0].token == token_b
+
+    def test_task_can_pause_again_if_the_renewed_token_is_refused(
+        self, rsa_keypair, client, monkeypatch
+    ):
+        """A refused renewal pauses again rather than failing the task."""
+        task, captured, _, _ = self._pause(
+            client,
+            monkeypatch,
+            rsa_keypair,
+            a2a_auth.A2ASubjectTokenRejectedError("still expired"),
+        )
+        token_b = make_token(rsa_keypair, expires_in=900)
+
+        response = client.post(
+            "/a2a", json=_renewal_body(task), headers=auth_headers(token_b)
+        )
+
+        again = response.json()["result"]["task"]
+        assert again["status"]["state"] == "TASK_STATE_AUTH_REQUIRED"
+        assert not captured
+
+    def test_another_caller_cannot_renew_the_task(
+        self, rsa_keypair, client, monkeypatch
+    ):
+        """Owner scoping hides a paused task from every other caller."""
+        task, captured, exchange, token_a = self._pause(
+            client, monkeypatch, rsa_keypair, EXCHANGED_CREDENTIAL
+        )
+        intruder = make_token(
+            rsa_keypair, sub="spiffe://trust-domain/ns/other/sa/intruder"
+        )
+
+        response = client.post(
+            "/a2a", json=_renewal_body(task), headers=auth_headers(intruder)
+        )
+
+        assert "error" in response.json()
+        assert exchange.await_count == 1
+        assert not captured
+        still = _get_task(client, task["id"], token_a)["result"]
+        assert still["status"]["state"] == "TASK_STATE_AUTH_REQUIRED"
+
+    def test_unrenewed_task_fails_and_frees_its_admission_slot(
+        self, rsa_keypair, app_factory, monkeypatch
+    ):
+        """Fail a paused task after its renewal window and release capacity."""
+        monkeypatch.setenv(a2a.AUTH_REQUIRED_TIMEOUT_ENV, "0.05")
+        controller = TaskAdmissionController(max_active_tasks=1)
+        client = TestClient(app_factory(admission_controller=controller))
+        task, captured, exchange, token_a = self._pause(
+            client, monkeypatch, rsa_keypair, EXCHANGED_CREDENTIAL
+        )
+        assert controller.active_count == 1
+
+        time.sleep(0.1)
+        expired = _get_task(client, task["id"], token_a)["result"]
+
+        assert expired["status"]["state"] == "TASK_STATE_FAILED"
+        assert (
+            "not supplied in time" in expired["status"]["message"]["parts"][0]["text"]
+        )
+        assert controller.active_count == 0
+        late = client.post(
+            "/a2a",
+            json=_renewal_body(task),
+            headers=auth_headers(make_token(rsa_keypair, expires_in=900)),
+        )
+        assert "error" in late.json()
+        assert exchange.await_count == 1
+        assert not captured

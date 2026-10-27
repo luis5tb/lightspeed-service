@@ -10,6 +10,7 @@ import pytest
 from a2a.server.context import ServerCallContext
 from a2a.types.a2a_pb2 import ListTasksRequest, Task, TaskState, TaskStatus
 
+from ols.app.endpoints import a2a_task_store
 from ols.app.endpoints.a2a_task_store import (
     ADMISSION_LEASE_STATE_KEY,
     BoundedInMemoryTaskStore,
@@ -188,3 +189,72 @@ def test_unbound_admission_lease_releases_after_setup_failure() -> None:
     lease.release_if_unbound()
     lease.release_if_unbound()
     assert controller.active_count == 0
+
+
+class _Clock:
+    """Controllable stand-in for the store's monotonic clock."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        """Return the controlled time."""
+        return self.now
+
+
+@pytest.mark.asyncio
+async def test_paused_task_fails_after_renewal_deadline(monkeypatch) -> None:
+    """Fail an AUTH_REQUIRED task once its window passes and release its slot."""
+    clock = _Clock()
+    monkeypatch.setattr(a2a_task_store, "time", clock)
+    controller = TaskAdmissionController(max_active_tasks=1)
+    store = BoundedInMemoryTaskStore(
+        _owner_from_context, controller, auth_required_timeout_seconds=60
+    )
+    await _save_new_task(store, controller, "owner", "paused")
+    await store.save(
+        _task("paused", TaskState.TASK_STATE_AUTH_REQUIRED), _context("owner")
+    )
+
+    clock.now += 59
+    assert await store.expire_auth_required() == 0
+    assert controller.active_count == 1
+
+    clock.now += 2
+    assert await store.expire_auth_required() == 1
+    expired = await store.get("paused", _context("owner"))
+    assert expired.status.state == TaskState.TASK_STATE_FAILED
+    assert "not supplied in time" in expired.status.message.parts[0].text
+    assert controller.active_count == 0
+
+
+@pytest.mark.asyncio
+async def test_resumed_task_is_not_expired(monkeypatch) -> None:
+    """Leaving AUTH_REQUIRED cancels the renewal deadline."""
+    clock = _Clock()
+    monkeypatch.setattr(a2a_task_store, "time", clock)
+    controller = TaskAdmissionController(max_active_tasks=1)
+    store = BoundedInMemoryTaskStore(
+        _owner_from_context, controller, auth_required_timeout_seconds=60
+    )
+    await _save_new_task(store, controller, "owner", "resumed")
+    await store.save(
+        _task("resumed", TaskState.TASK_STATE_AUTH_REQUIRED), _context("owner")
+    )
+    await store.save(_task("resumed", TaskState.TASK_STATE_WORKING), _context("owner"))
+
+    clock.now += 120
+    assert await store.expire_auth_required() == 0
+    task = await store.get("resumed", _context("owner"))
+    assert task.status.state == TaskState.TASK_STATE_WORKING
+    assert controller.active_count == 1
+
+
+def test_auth_required_timeout_must_be_positive() -> None:
+    """Reject a non-positive renewal window."""
+    with pytest.raises(ValueError):
+        BoundedInMemoryTaskStore(
+            _owner_from_context,
+            TaskAdmissionController(),
+            auth_required_timeout_seconds=0,
+        )
